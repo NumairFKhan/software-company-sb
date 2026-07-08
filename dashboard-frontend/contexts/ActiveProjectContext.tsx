@@ -16,6 +16,7 @@ import type {
   ApprovalResolvedEvent,
   StageTransitionEvent,
   TokenUsageEntry,
+  TokenUsageUpdateEvent,
   WebSocketStatus,
   ToolUseEvent,
 } from '@/types';
@@ -57,7 +58,14 @@ export type ActiveProjectAction =
   | { type: 'SET_PROJECT'; payload: Project | null }
   | { type: 'ADD_EVENT'; payload: PipelineEvent }
   | { type: 'ADD_EVENTS'; payload: PipelineEvent[] }
-  | { type: 'SET_WS_STATUS'; payload: WebSocketStatus };
+  | { type: 'SET_WS_STATUS'; payload: WebSocketStatus }
+  /**
+   * SET_TOKEN_USAGE – replaces the tokenUsage array in full.
+   * Dispatched by TokenUsageWidget after fetching initial data from
+   * GET /api/projects/{id}/token_usage.  Live token_usage_update events
+   * are merged incrementally via ADD_EVENT instead.
+   */
+  | { type: 'SET_TOKEN_USAGE'; payload: TokenUsageEntry[] };
 
 export const initialActiveProjectState: ActiveProjectState = {
   selectedProjectId: null,
@@ -99,6 +107,7 @@ function applyEvent(
   let newCompletedStages = state.completed_stages;
   let newDeveloperProgress = state.developer_progress;
   let newToolUseEvents = state.toolUseEvents;
+  let newTokenUsage = state.tokenUsage;
 
   // ── tool_use event → populate toolUseEvents map ───────────────────────────
   if (event.type === 'tool_use') {
@@ -149,6 +158,25 @@ function applyEvent(
     };
   }
 
+  // ── Token usage update ──────────────────────────────────────────────────────
+  // token_usage_update events are emitted by the backend when an agent
+  // completes.  We upsert by agent_role so the widget always shows the latest
+  // cumulative totals for each role.
+  if (event.type === 'token_usage_update') {
+    const tokenEvent = event as TokenUsageUpdateEvent;
+    const entry = tokenEvent.payload as unknown as TokenUsageEntry;
+    const existingIdx = newTokenUsage.findIndex(
+      (t) => t.agent_role === entry.agent_role,
+    );
+    if (existingIdx >= 0) {
+      // Replace the existing entry for this role with the updated values.
+      newTokenUsage = [...newTokenUsage];
+      newTokenUsage[existingIdx] = entry;
+    } else {
+      newTokenUsage = [...newTokenUsage, entry];
+    }
+  }
+
   return {
     ...state,
     events: newEvents,
@@ -158,6 +186,7 @@ function applyEvent(
     completed_stages: newCompletedStages,
     developer_progress: newDeveloperProgress,
     toolUseEvents: newToolUseEvents,
+    tokenUsage: newTokenUsage,
   };
 }
 
@@ -195,6 +224,11 @@ export function activeProjectReducer(
 
     case 'SET_WS_STATUS':
       return { ...state, wsStatus: action.payload };
+
+    case 'SET_TOKEN_USAGE':
+      // Full replacement — used by TokenUsageWidget after the initial API fetch.
+      // Live updates use ADD_EVENT (token_usage_update) to upsert incrementally.
+      return { ...state, tokenUsage: action.payload };
 
     default:
       return state;

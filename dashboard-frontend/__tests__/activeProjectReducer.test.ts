@@ -2,7 +2,7 @@
  * Unit tests for the ActiveProjectContext reducer.
  * Covers: SELECT_PROJECT, SET_PROJECT, ADD_EVENT (dedup), ADD_EVENTS (batch
  * dedup), SET_WS_STATUS, approval event handling, stage_transition events,
- * and developer progress parsing.
+ * developer progress parsing, token_usage_update events, and SET_TOKEN_USAGE.
  */
 
 import {
@@ -16,6 +16,9 @@ import type {
   ApprovalRequestEvent,
   ApprovalResolvedEvent,
   StageTransitionEvent,
+  TokenUsageUpdateEvent,
+  TokenUsageEntry,
+  AgentRole,
 } from '@/types';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -427,6 +430,170 @@ describe('toolUseEvents', () => {
   it('initialises toolUseEvents as empty Map', () => {
     expect(state.toolUseEvents).toBeInstanceOf(Map);
     expect(state.toolUseEvents.size).toBe(0);
+  });
+});
+
+// ── token_usage_update events ─────────────────────────────────────────────────
+
+describe('token_usage_update events', () => {
+  function makeTokenUsageEvent(
+    id: string,
+    agentRole: AgentRole,
+    costUsd = 0.01,
+    callCount = 1,
+  ): TokenUsageUpdateEvent {
+    return {
+      event_id: id,
+      project_id: 'proj-1',
+      type: 'token_usage_update',
+      role: agentRole,
+      timestamp: '2024-01-01T00:00:00Z',
+      payload: {
+        agent_role:    agentRole,
+        input_tokens:  1000,
+        output_tokens: 500,
+        cost_usd:      costUsd,
+        call_count:    callCount,
+      },
+    };
+  }
+
+  it('adds a new TokenUsageEntry when the agent_role is not yet in state', () => {
+    const event = makeTokenUsageEvent('e1', 'developer');
+    const next = activeProjectReducer(state, { type: 'ADD_EVENT', payload: event });
+    expect(next.tokenUsage).toHaveLength(1);
+    expect(next.tokenUsage[0].agent_role).toBe('developer');
+    expect(next.tokenUsage[0].cost_usd).toBe(0.01);
+  });
+
+  it('upserts (replaces) an existing entry for the same agent_role', () => {
+    const e1 = makeTokenUsageEvent('e1', 'developer', 0.01, 1);
+    const e2 = makeTokenUsageEvent('e2', 'developer', 0.05, 5); // updated totals
+    const s1 = activeProjectReducer(state, { type: 'ADD_EVENT', payload: e1 });
+    const s2 = activeProjectReducer(s1, { type: 'ADD_EVENT', payload: e2 });
+
+    expect(s2.tokenUsage).toHaveLength(1); // still one entry
+    expect(s2.tokenUsage[0].cost_usd).toBe(0.05);
+    expect(s2.tokenUsage[0].call_count).toBe(5);
+  });
+
+  it('keeps entries for other roles when upserting a single role', () => {
+    const e1 = makeTokenUsageEvent('e1', 'developer', 0.01, 1);
+    const e2 = makeTokenUsageEvent('e2', 'architect', 0.02, 2);
+    const s1 = activeProjectReducer(state, { type: 'ADD_EVENT', payload: e1 });
+    const s2 = activeProjectReducer(s1, { type: 'ADD_EVENT', payload: e2 });
+
+    expect(s2.tokenUsage).toHaveLength(2);
+    expect(s2.tokenUsage.find((t) => t.agent_role === 'developer')?.cost_usd).toBe(0.01);
+    expect(s2.tokenUsage.find((t) => t.agent_role === 'architect')?.cost_usd).toBe(0.02);
+  });
+
+  it('processes token_usage_update events from an ADD_EVENTS batch', () => {
+    const events: PipelineEvent[] = [
+      makeTokenUsageEvent('e1', 'developer', 0.01, 1),
+      makeTokenUsageEvent('e2', 'architect', 0.02, 2),
+      makeTokenUsageEvent('e3', 'qa_tester', 0.005, 1),
+    ];
+    const next = activeProjectReducer(state, { type: 'ADD_EVENTS', payload: events });
+    expect(next.tokenUsage).toHaveLength(3);
+  });
+
+  it('does not add token_usage_update to the events list as a duplicate', () => {
+    const event = makeTokenUsageEvent('e1', 'developer');
+    const s1 = activeProjectReducer(state, { type: 'ADD_EVENT', payload: event });
+    const s2 = activeProjectReducer(s1, { type: 'ADD_EVENT', payload: event });
+
+    // Event deduplication still applies.
+    expect(s2.events).toHaveLength(1);
+    expect(s2).toBe(s1); // exact same state object returned
+  });
+
+  it('resets tokenUsage when SELECT_PROJECT is called', () => {
+    const event = makeTokenUsageEvent('e1', 'developer');
+    const withData = activeProjectReducer(state, { type: 'ADD_EVENT', payload: event });
+    expect(withData.tokenUsage).toHaveLength(1);
+
+    const reset = activeProjectReducer(withData, {
+      type: 'SELECT_PROJECT',
+      payload: 'new-project',
+    });
+    expect(reset.tokenUsage).toHaveLength(0);
+  });
+});
+
+// ── SET_TOKEN_USAGE ───────────────────────────────────────────────────────────
+
+describe('SET_TOKEN_USAGE', () => {
+  function makeEntry(
+    agentRole: AgentRole,
+    overrides: Partial<TokenUsageEntry> = {},
+  ): TokenUsageEntry {
+    return {
+      agent_role:    agentRole,
+      input_tokens:  1000,
+      output_tokens: 500,
+      cost_usd:      0.01,
+      call_count:    1,
+      ...overrides,
+    };
+  }
+
+  it('sets tokenUsage from the API payload', () => {
+    const entries = [makeEntry('developer'), makeEntry('architect')];
+    const next = activeProjectReducer(state, {
+      type: 'SET_TOKEN_USAGE',
+      payload: entries,
+    });
+    expect(next.tokenUsage).toHaveLength(2);
+    expect(next.tokenUsage[0].agent_role).toBe('developer');
+    expect(next.tokenUsage[1].agent_role).toBe('architect');
+  });
+
+  it('replaces existing tokenUsage in full', () => {
+    const initial = [makeEntry('developer', { cost_usd: 0.001, call_count: 1 })];
+    const s1 = activeProjectReducer(state, {
+      type: 'SET_TOKEN_USAGE',
+      payload: initial,
+    });
+
+    const updated = [
+      makeEntry('developer', { cost_usd: 0.02, call_count: 5 }),
+      makeEntry('architect', { cost_usd: 0.01, call_count: 2 }),
+    ];
+    const s2 = activeProjectReducer(s1, {
+      type: 'SET_TOKEN_USAGE',
+      payload: updated,
+    });
+
+    expect(s2.tokenUsage).toHaveLength(2);
+    expect(s2.tokenUsage[0].cost_usd).toBe(0.02);
+    expect(s2.tokenUsage[0].call_count).toBe(5);
+  });
+
+  it('accepts an empty array (clears all entries)', () => {
+    const s1 = activeProjectReducer(state, {
+      type: 'SET_TOKEN_USAGE',
+      payload: [makeEntry('developer')],
+    });
+    const s2 = activeProjectReducer(s1, {
+      type: 'SET_TOKEN_USAGE',
+      payload: [],
+    });
+    expect(s2.tokenUsage).toHaveLength(0);
+  });
+
+  it('does not mutate other fields when setting token usage', () => {
+    const entries = [makeEntry('developer')];
+    const next = activeProjectReducer(state, {
+      type: 'SET_TOKEN_USAGE',
+      payload: entries,
+    });
+
+    // All other fields remain at their initial values.
+    expect(next.selectedProjectId).toBe(state.selectedProjectId);
+    expect(next.project).toBe(state.project);
+    expect(next.events).toHaveLength(0);
+    expect(next.wsStatus).toBe(state.wsStatus);
   });
 });
 

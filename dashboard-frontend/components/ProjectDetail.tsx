@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useActiveProject } from '@/contexts/ActiveProjectContext';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { getProject } from '@/lib/api';
@@ -11,15 +11,67 @@ import { ChatPanel } from '@/components/ChatPanel';
 import { ApprovalCard } from '@/components/ApprovalCard';
 import { StageTracker } from '@/components/StageTracker';
 import { ActivityFeed } from '@/components/ActivityFeed';
+import { TokenUsageWidget } from '@/components/TokenUsageWidget';
 
-// ── WS status indicator dot ────────────────────────────────────────────────────
+// ── WS connection status indicator ─────────────────────────────────────────────
+// Acceptance criteria: connected=green, reconnecting=yellow, disconnected=red.
+// "connecting" is treated as yellow (transitional state, same UX as reconnecting).
 
-const WS_STATUS_DOT: Record<string, string> = {
-  connected: 'bg-green-500',
-  reconnecting: 'bg-yellow-500',
-  connecting: 'bg-blue-500',
-  disconnected: 'bg-red-500',
+const WS_STATUS_CONFIG: Record<
+  string,
+  { dotClass: string; label: string }
+> = {
+  connected:    { dotClass: 'bg-green-500',  label: 'connected'    },
+  reconnecting: { dotClass: 'bg-yellow-500', label: 'reconnecting' },
+  connecting:   { dotClass: 'bg-yellow-500', label: 'connecting'   },
+  disconnected: { dotClass: 'bg-red-500',    label: 'disconnected' },
 };
+
+// ── CopyPrButton ───────────────────────────────────────────────────────────────
+
+/**
+ * "Copy PR link" button with a transient "Copied!" tooltip.
+ * Uses navigator.clipboard.writeText; shows the tooltip for 2 s after success.
+ */
+function CopyPrButton({ prUrl }: { prUrl: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(prUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch((err) => {
+      console.error('[ProjectDetail] Failed to copy PR URL:', err);
+    });
+  }, [prUrl]);
+
+  return (
+    <div className="relative">
+      <button
+        onClick={handleCopy}
+        className="text-xs text-blue-600 hover:text-blue-800 px-2 py-1 rounded
+                   hover:bg-blue-50 transition-colors focus:outline-none
+                   focus:ring-2 focus:ring-blue-400 focus:ring-offset-1"
+        aria-label="Copy pull request link"
+        data-testid="copy-pr-button"
+      >
+        Copy PR link
+      </button>
+      {copied && (
+        <span
+          className="absolute top-full mt-1 left-1/2 -translate-x-1/2
+                     bg-gray-800 text-white text-xs px-2 py-1 rounded
+                     whitespace-nowrap pointer-events-none z-10"
+          role="status"
+          aria-live="polite"
+          data-testid="copy-pr-tooltip"
+        >
+          Copied!
+        </span>
+      )}
+    </div>
+  );
+}
 
 // ── Inner component (only rendered when a project is selected) ─────────────────
 // Keyed on projectId in the parent so that the WS hook and fetch effect are
@@ -83,12 +135,13 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
     };
   }, [projectId, dispatch]);
 
-  const dotClass = WS_STATUS_DOT[status] ?? 'bg-gray-400';
+  const wsConfig =
+    WS_STATUS_CONFIG[status] ?? { dotClass: 'bg-gray-400', label: status };
 
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* ── Header ── */}
-      <div className="flex-shrink-0 p-4 border-b border-gray-200 flex items-center gap-3">
+      <div className="flex-shrink-0 p-4 border-b border-surface-200 flex items-center gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-gray-900 truncate">
             {state.project?.name ?? 'Loading…'}
@@ -99,29 +152,25 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
         </div>
 
         <div className="ml-auto flex items-center gap-2 flex-shrink-0">
-          {/* Copy PR link */}
+          {/* Copy PR link button — only shown when a PR URL is available */}
           {state.project?.pr_url && (
-            <a
-              href={state.project.pr_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-blue-600 hover:underline"
-              aria-label="Open pull request"
-            >
-              PR ↗
-            </a>
+            <CopyPrButton prUrl={state.project.pr_url} />
           )}
 
-          {/* WS connection status */}
+          {/* WS connection-status indicator
+              Sourced directly from useWebSocket's status field (synced to context).
+              Colors: connected=green, reconnecting/connecting=yellow, disconnected=red. */}
           <div
             className="flex items-center gap-1 text-xs text-gray-500"
-            aria-label={`WebSocket status: ${status}`}
+            aria-label={`WebSocket status: ${wsConfig.label}`}
+            data-testid="ws-status-indicator"
           >
             <span
-              className={`w-2 h-2 rounded-full flex-shrink-0 ${dotClass}`}
+              className={`w-2 h-2 rounded-full flex-shrink-0 ${wsConfig.dotClass}`}
               aria-hidden="true"
+              data-testid={`ws-status-dot-${status}`}
             />
-            <span>{status}</span>
+            <span>{wsConfig.label}</span>
           </div>
         </div>
       </div>
@@ -133,7 +182,7 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
         developer_progress={state.developer_progress}
       />
 
-      {/* ── Activity feed (Ticket 5) ── */}
+      {/* ── Activity feed ── */}
       <ActivityFeed
         events={state.events}
         toolUseEvents={state.toolUseEvents}
@@ -145,7 +194,7 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
           populated by approval_request / approval_resolved events in the reducer.
           Resolved approvals render as compact badges; pending ones show action buttons. */}
       {state.approvals.size > 0 && (
-        <div className="flex-shrink-0 border-t border-gray-200 bg-gray-50 px-4 py-2 space-y-2 max-h-48 overflow-y-auto">
+        <div className="flex-shrink-0 border-t border-surface-200 bg-surface-50 px-4 py-2 space-y-2 max-h-48 overflow-y-auto">
           {Array.from(state.approvals.values()).map((approval) => (
             <ApprovalCard
               key={approval.approval_id}
@@ -156,7 +205,13 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      {/* ── Chat panel (Ticket 4) ── */}
+      {/* ── Token usage widget ──
+          Fetches initial data from GET /api/projects/{id}/token_usage on
+          mount; updates live as token_usage_update events arrive via the
+          already-open WS subscription. */}
+      <TokenUsageWidget projectId={projectId} />
+
+      {/* ── Chat panel ── */}
       <ChatPanel />
     </div>
   );
