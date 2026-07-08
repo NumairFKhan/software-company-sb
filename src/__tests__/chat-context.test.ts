@@ -320,3 +320,59 @@ describe("buildSystemPrompt – data-rich scenario", () => {
     expect(bulletCount).toBe(12);
   });
 });
+
+// ── buildSystemPrompt – calendar summary ──────────────────────────────────────
+
+describe("buildSystemPrompt – calendar summary injection", () => {
+  it("omits the Upcoming Week section when calendarSummary is null", () => {
+    const prompt = buildSystemPrompt(makeProfile(), [], null);
+    expect(prompt).not.toContain("Upcoming Week");
+    expect(prompt).not.toContain("Google Calendar");
+  });
+
+  it("omits the Upcoming Week section when calendarSummary is not provided (default)", () => {
+    const prompt = buildSystemPrompt(makeProfile(), []);
+    expect(prompt).not.toContain("Upcoming Week");
+  });
+
+  it("includes the Upcoming Week section when calendarSummary is a non-empty string", () => {
+    const summary =
+      "- Tue Jul 14, 9:00 AM: Club Tournament\n- Thu Jul 16 (all day): Travel Day";
+    const prompt = buildSystemPrompt(makeProfile(), [], summary);
+    expect(prompt).toContain("Upcoming Week");
+    expect(prompt).toContain("Club Tournament");
+    expect(prompt).toContain("Travel Day");
+  });
+
+  it("instructs the coach not to fabricate calendar events", () => {
+    const summary = "- Mon Jul 13, 8:00 AM: Morning Fitness";
+    const prompt = buildSystemPrompt(makeProfile(), [], summary);
+    // Should contain the no-fabrication instruction for calendar data
+    expect(prompt.toUpperCase()).toContain("NOT FABRICATE");
+  });
+
+  it("places the calendar section after the session log section", () => {
+    const summary = "- Tue Jul 14, 9:00 AM: Tournament";
+    const prompt = buildSystemPrompt(makeProfile(), [], summary);
+    const sessionLogIdx = prompt.indexOf("Recent Training Log");
+    const calendarIdx = prompt.indexOf("Upcoming Week");
+    expect(calendarIdx).toBeGreaterThan(sessionLogIdx);
+  });
+
+  it("places the calendar section before the hard rules section", () => {
+    const summary = "- Tue Jul 14, 9:00 AM: Tournament";
+    const prompt = buildSystemPrompt(makeProfile(), [], summary);
+    const calendarIdx = prompt.indexOf("Upcoming Week");
+    const rulesIdx = prompt.indexOf("Rules (always follow");
+    expect(calendarIdx).toBeLessThan(rulesIdx);
+  });
+
+  it("still includes the full rules section when calendar data is present", () => {
+    const summary = "- Tue Jul 14, 9:00 AM: Tournament";
+    const prompt = buildSystemPrompt(makeProfile(), [], summary);
+    expect(prompt).toContain(
+      "If pain is sharp, persistent, or worsening — stop play and see a medical professional."
+    );
+    expect(prompt).toContain("fabricate");
+  });
+});

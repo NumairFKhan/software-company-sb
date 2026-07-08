@@ -122,10 +122,16 @@ export function serializeSession(session: SessionLog): string {
  *
  * When sessions is empty, the prompt explicitly says no logs exist so the
  * model does not invent session data.
+ *
+ * When calendarSummary is provided (non-null), an "Upcoming Week" section is
+ * injected so the coach can reference schedule context (e.g. tournaments,
+ * travel, or busy days) when giving advice.  When null, the section is omitted
+ * entirely — the rest of the prompt is unaffected.
  */
 export function buildSystemPrompt(
   profile: PlayerProfile | null,
-  recentSessions: SessionLog[]
+  recentSessions: SessionLog[],
+  calendarSummary: string | null = null
 ): string {
   const sections: string[] = [];
 
@@ -182,7 +188,14 @@ export function buildSystemPrompt(
     );
   }
 
-  // ── [4] Hard rules ─────────────────────────────────────────────────────────
+  // ── [4] Upcoming week from Google Calendar (optional) ─────────────────────
+  if (calendarSummary) {
+    sections.push(
+      `## Upcoming Week (Google Calendar — next 7 days)\n${calendarSummary}\n\nUse this calendar context to give scheduling-aware advice. For example, note if the player has a tournament coming up, has a busy travel day, or should taper their training load. Do NOT fabricate calendar events beyond what is listed above.`
+    );
+  }
+
+  // ── [5] Hard rules ─────────────────────────────────────────────────────────
   sections.push(
     `## Rules (always follow these — non-negotiable)
 

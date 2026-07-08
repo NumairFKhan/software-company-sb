@@ -31,6 +31,7 @@ import { NextRequest } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt } from "@/lib/chat-context";
 import { checkChatRateLimit } from "@/lib/rate-limit";
+import { getUpcomingCalendarEvents, formatCalendarSummary } from "@/lib/google-calendar";
 import type { PlayerProfile, SessionLog } from "@/types/database";
 
 // Initialise the Anthropic client once per Lambda cold-start.
@@ -129,12 +130,12 @@ export async function POST(request: NextRequest) {
 
   const trimmedMessage = message.trim();
 
-  // ── Fetch player context (profile + last-30-day sessions) ──────────────────
+  // ── Fetch player context (profile + last-30-day sessions + calendar) ────────
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
   const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().slice(0, 10);
 
-  const [profileResult, sessionsResult] = await Promise.all([
+  const [profileResult, sessionsResult, calendarEvents] = await Promise.all([
     supabase
       .from("player_profiles")
       .select("*")
@@ -148,6 +149,8 @@ export async function POST(request: NextRequest) {
       .gte("log_date", thirtyDaysAgoStr)
       .order("log_date", { ascending: false })
       .order("created_at", { ascending: false }),
+    // Calendar fetch is best-effort; null is returned gracefully on any failure
+    getUpcomingCalendarEvents(supabase, user.id),
   ]);
 
   if (profileResult.error) {
@@ -159,9 +162,12 @@ export async function POST(request: NextRequest) {
 
   const profile = (profileResult.data as PlayerProfile | null) ?? null;
   const recentSessions = (sessionsResult.data as SessionLog[]) ?? [];
+  const calendarSummary = calendarEvents
+    ? formatCalendarSummary(calendarEvents)
+    : null;
 
   // ── Build system prompt ────────────────────────────────────────────────────
-  const systemPrompt = buildSystemPrompt(profile, recentSessions);
+  const systemPrompt = buildSystemPrompt(profile, recentSessions, calendarSummary);
 
   // ── Persist user message before streaming ──────────────────────────────────
   const { error: insertError } = await supabase.from("chat_messages").insert({

@@ -16,6 +16,10 @@ import type { PlayerProfile, SessionLog, DailyRecommendation } from "@/types/dat
 import type { PhysicalStatus } from "@/types/database";
 import { generateRecommendation, derivePhysicalStatus } from "@/lib/recommendation";
 import type { RecoveryDetails } from "@/lib/recommendation";
+import {
+  getUpcomingCalendarEvents,
+  type CalendarEvent,
+} from "@/lib/google-calendar";
 import RefreshButton from "./RefreshButton";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -129,13 +133,13 @@ export default async function DashboardPage() {
     );
   }
 
-  // ── Fetch sessions + recommendation in parallel ──────────────────────────────
+  // ── Fetch sessions + recommendation + calendar in parallel ───────────────────
   const todayStr = new Date().toISOString().slice(0, 10);
   const fourteenDaysAgo = new Date();
   fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
   const fourteenDaysAgoStr = fourteenDaysAgo.toISOString().slice(0, 10);
 
-  const [sessionsResult, existingRecResult] = await Promise.all([
+  const [sessionsResult, existingRecResult, calendarEvents] = await Promise.all([
     supabase
       .from("session_logs")
       .select("*")
@@ -150,6 +154,8 @@ export default async function DashboardPage() {
       .eq("user_id", user!.id)
       .eq("recommendation_date", todayStr)
       .maybeSingle(),
+    // Calendar fetch is best-effort — null if not connected or API fails
+    getUpcomingCalendarEvents(supabase, user!.id),
   ]);
 
   const allSessions = (sessionsResult.data as SessionLog[]) ?? [];
@@ -277,6 +283,27 @@ export default async function DashboardPage() {
           </div>
         )}
       </section>
+
+      {/* ── Upcoming Week (Google Calendar) — shown only when connected ── */}
+      {calendarEvents !== null && calendarEvents.length > 0 && (
+        <section>
+          <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">
+            📅 Upcoming Week
+          </h2>
+          <div className="rounded-2xl bg-slate-900 border border-slate-800 divide-y divide-slate-800">
+            {(calendarEvents as CalendarEvent[]).map((event, idx) => (
+              <div key={idx} className="flex items-start gap-3 px-4 py-3">
+                <span className="shrink-0 text-xs text-slate-500 w-36 pt-0.5">
+                  {event.startLabel}
+                </span>
+                <span className="text-sm text-slate-200 leading-snug">
+                  {event.title}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ── Quick actions ── */}
       <section>
