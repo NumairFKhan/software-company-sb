@@ -16,6 +16,8 @@ export interface Coach {
   lng: number | null;
   zip: string | null;
   sport: string | null;
+  photo_url: string | null;
+  stripe_account_id: string | null;
   onboarding_complete: boolean;
   created_at: string;
   updated_at: string;
