@@ -94,9 +94,9 @@ describe("deriveOpenSlots()", () => {
 describe("groupSlotsByDate()", () => {
   it("groups slots by date string", () => {
     const slots = [
-      { date: "2026-07-06", start_time: "09:00", end_time: "10:00", start_datetime: "2026-07-06T09:00:00Z" },
-      { date: "2026-07-06", start_time: "10:00", end_time: "11:00", start_datetime: "2026-07-06T10:00:00Z" },
-      { date: "2026-07-07", start_time: "09:00", end_time: "10:00", start_datetime: "2026-07-07T09:00:00Z" },
+      { date: "2026-07-06", start_time: "09:00", end_time: "10:00", start_datetime: "2026-07-06T09:00:00Z", end_datetime: "2026-07-06T10:00:00Z" },
+      { date: "2026-07-06", start_time: "10:00", end_time: "11:00", start_datetime: "2026-07-06T10:00:00Z", end_datetime: "2026-07-06T11:00:00Z" },
+      { date: "2026-07-07", start_time: "09:00", end_time: "10:00", start_datetime: "2026-07-07T09:00:00Z", end_datetime: "2026-07-07T10:00:00Z" },
     ];
 
     const grouped = groupSlotsByDate(slots);

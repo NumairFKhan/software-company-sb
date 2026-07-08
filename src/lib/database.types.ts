@@ -67,19 +67,23 @@ export interface OpenSlot {
   date: string;           // "YYYY-MM-DD"
   start_time: string;     // "HH:MM"
   end_time: string;       // "HH:MM"
-  start_datetime: string; // ISO string (for display / booking)
+  start_datetime: string; // ISO string (for booking / display)
+  end_datetime: string;   // ISO string (for booking)
 }
 
 export interface Booking {
   id: string;
   coach_id: string;
-  player_id: string;
+  player_id: string | null;           // null for guest (no-account) checkouts
   availability_slot_id: string | null;
   slot_start: string;
   slot_end: string;
   status: BookingStatus;
   hourly_rate: number;
   stripe_payment_intent_id: string | null;
+  stripe_checkout_session_id: string | null;
+  guest_name: string | null;
+  guest_email: string | null;
   notes: string | null;
   created_at: string;
   updated_at: string;

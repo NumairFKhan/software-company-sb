@@ -14,7 +14,8 @@ import type { Metadata } from "next";
 import { createClient } from "@supabase/supabase-js";
 import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import type { Coach, RecurringSlot } from "@/lib/database.types";
-import { deriveOpenSlots, groupSlotsByDate, formatDate, formatTime } from "@/lib/availability";
+import { deriveOpenSlots } from "@/lib/availability";
+import SlotPicker from "./SlotPicker";
 
 /** We use the anon key (no cookies needed) to read public coach rows. */
 function getAnonClient() {
@@ -114,7 +115,6 @@ export default async function CoachProfilePage({ params }: Props) {
   );
 
   const openSlots = deriveOpenSlots(recurringSlots, confirmedBookings, 4);
-  const slotsByDate = groupSlotsByDate(openSlots).slice(0, 14); // show up to 14 days with slots
 
   return (
     <main className="min-h-screen bg-gray-50 px-4 py-12">
@@ -186,55 +186,22 @@ export default async function CoachProfilePage({ params }: Props) {
               </div>
             )}
 
-            {/* CTA placeholder — booking flow is in a later ticket */}
-            <div className="mt-6 border-t pt-6">
-              <button
-                disabled
-                className="w-full cursor-not-allowed rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white opacity-50"
-                title="Booking coming soon"
-              >
-                Book a session
-              </button>
-            </div>
           </div>
         </div>
 
         {/* ---------------------------------------------------------------- */}
-        {/* Open availability for the next 4 weeks                           */}
+        {/* Interactive slot picker — select a slot and book as a guest       */}
         {/* ---------------------------------------------------------------- */}
-        <div className="mt-6 rounded-2xl bg-white p-6 shadow-md">
-          <h2 className="text-base font-semibold text-gray-900">
-            Upcoming availability
-          </h2>
-
-          {slotsByDate.length === 0 ? (
+        {recurringSlots.length === 0 ? (
+          <div className="mt-6 rounded-2xl bg-white p-6 shadow-md">
+            <h2 className="text-base font-semibold text-gray-900">Book a session</h2>
             <p className="mt-3 text-sm text-gray-500">
-              {recurringSlots.length === 0
-                ? "This coach hasn't set their availability yet."
-                : "No open sessions in the next 4 weeks."}
+              This coach hasn&apos;t set their availability yet.
             </p>
-          ) : (
-            <div className="mt-3 space-y-4">
-              {slotsByDate.map(({ date, slots }) => (
-                <div key={date}>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                    {formatDate(date)}
-                  </p>
-                  <div className="mt-1.5 flex flex-wrap gap-2">
-                    {slots.map((slot) => (
-                      <span
-                        key={slot.start_datetime}
-                        className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700"
-                      >
-                        {formatTime(slot.start_time)} – {formatTime(slot.end_time)}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <SlotPicker coachId={typedCoach.id} openSlots={openSlots} />
+        )}
       </div>
     </main>
   );

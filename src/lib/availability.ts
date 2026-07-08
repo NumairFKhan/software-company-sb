@@ -73,6 +73,7 @@ export function deriveOpenSlots(
           start_time: slot.start_time,
           end_time: slot.end_time,
           start_datetime: slotStart.toISOString(),
+          end_datetime: slotEnd.toISOString(),
         });
       }
     }
