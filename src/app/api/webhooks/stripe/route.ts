@@ -164,6 +164,7 @@ async function handleCheckoutSessionCompleted(
     SESSION_TIME: sessionTime,
     AMOUNT_PAID: amountPaid,
     APP_URL: appUrl,
+    CANCELLATION_POLICY_URL: `${appUrl}/cancellation-policy`,
   };
 
   // Player confirmation

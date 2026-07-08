@@ -87,6 +87,8 @@ export interface Booking {
   guest_name: string | null;
   guest_email: string | null;
   notes: string | null;
+  /** Set by the reminders cron job once the 24-hour reminder emails have been sent. */
+  reminder_sent_at: string | null;
   created_at: string;
   updated_at: string;
 }

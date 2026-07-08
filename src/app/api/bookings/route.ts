@@ -21,9 +21,13 @@ import { checkRateLimit } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
-// Default cancellation policy shown verbatim in the Stripe product description
-const CANCELLATION_POLICY =
-  "Free cancellation up to 24 hours before your session. No refunds within 24 hours of the start time.";
+/**
+ * Returns the cancellation policy text shown in the Stripe Checkout product
+ * description, including a link to the full /cancellation-policy page.
+ */
+function getCancellationPolicyText(appUrl: string): string {
+  return `Free cancellation up to 24 hours before your session. No refunds within 24 hours of the start time. Full policy: ${appUrl}/cancellation-policy`;
+}
 
 interface BookingRequestBody {
   coachId: string;
@@ -152,6 +156,7 @@ export async function POST(request: NextRequest) {
   const sportLabel = coach.sport ? `${coach.sport} ` : "";
   const productName = `1-hour ${sportLabel}session with ${coach.full_name}`;
   const unitAmountCents = Math.round(Number(coach.hourly_rate) * 100);
+  const cancellationPolicyText = getCancellationPolicyText(appUrl);
 
   let checkoutSession: Awaited<ReturnType<typeof stripe.checkout.sessions.create>>;
   try {
@@ -164,7 +169,7 @@ export async function POST(request: NextRequest) {
             currency: "usd",
             product_data: {
               name: productName,
-              description: `Cancellation policy: ${CANCELLATION_POLICY}`,
+              description: cancellationPolicyText,
             },
             unit_amount: unitAmountCents,
           },
