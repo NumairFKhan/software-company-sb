@@ -10,6 +10,7 @@ import type { PipelineEvent } from '@/types';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ApprovalCard } from '@/components/ApprovalCard';
 import { StageTracker } from '@/components/StageTracker';
+import { ActivityFeed } from '@/components/ActivityFeed';
 
 // ── WS status indicator dot ────────────────────────────────────────────────────
 
@@ -132,33 +133,12 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
         developer_progress={state.developer_progress}
       />
 
-      {/* ── Event feed (stub — Ticket 5 will flesh this out) ── */}
-      <div className="flex-1 overflow-y-auto p-4 min-h-0">
-        {state.events.length === 0 ? (
-          <p className="text-sm text-gray-500 text-center py-8">
-            {status === 'connecting' || status === 'reconnecting'
-              ? 'Connecting to event stream…'
-              : 'No events yet.'}
-          </p>
-        ) : (
-          <ul className="space-y-0.5" aria-label="Event log">
-            {state.events.map((event) => (
-              <li
-                key={event.event_id}
-                className="text-xs font-mono text-gray-700 border-b border-gray-100 py-1 flex gap-2"
-              >
-                <span className="text-gray-400 flex-shrink-0">
-                  {new Date(event.timestamp).toLocaleTimeString()}
-                </span>
-                <span className="font-semibold">{event.type}</span>
-                {event.role && (
-                  <span className="text-blue-500">({event.role})</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {/* ── Activity feed (Ticket 5) ── */}
+      <ActivityFeed
+        events={state.events}
+        toolUseEvents={state.toolUseEvents}
+        wsStatus={state.wsStatus}
+      />
 
       {/* ── Inline approval cards ── */}
       {/* Cards are driven by state.approvals (Map<approval_id, ApprovalRequest>),

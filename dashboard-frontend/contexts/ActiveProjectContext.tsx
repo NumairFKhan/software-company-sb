@@ -17,6 +17,7 @@ import type {
   StageTransitionEvent,
   TokenUsageEntry,
   WebSocketStatus,
+  ToolUseEvent,
 } from '@/types';
 
 // ── State & Actions ────────────────────────────────────────────────────────────
@@ -44,6 +45,11 @@ export interface ActiveProjectState {
    * found in any event payload. Null until the pattern is first seen.
    */
   developer_progress: { current: number; total: number } | null;
+  /**
+   * Map<tool_use_id, ToolUseEvent> so that tool_result event rows can look up
+   * their parent tool_use event for correlation (shows parent tool_name, etc.).
+   */
+  toolUseEvents: Map<string, ToolUseEvent>;
 }
 
 export type ActiveProjectAction =
@@ -64,6 +70,7 @@ export const initialActiveProjectState: ActiveProjectState = {
   current_stage: null,
   completed_stages: [],
   developer_progress: null,
+  toolUseEvents: new Map(),
 };
 
 /** Regex to detect Developer ticket sub-progress in any event payload string. */
@@ -91,6 +98,14 @@ function applyEvent(
   let newCurrentStage = state.current_stage;
   let newCompletedStages = state.completed_stages;
   let newDeveloperProgress = state.developer_progress;
+  let newToolUseEvents = state.toolUseEvents;
+
+  // ── tool_use event → populate toolUseEvents map ───────────────────────────
+  if (event.type === 'tool_use') {
+    const toolEvent = event as ToolUseEvent;
+    newToolUseEvents = new Map(state.toolUseEvents);
+    newToolUseEvents.set(toolEvent.payload.tool_use_id, toolEvent);
+  }
 
   // ── Approval handling ──────────────────────────────────────────────────────
   if (event.type === 'approval_request') {
@@ -142,6 +157,7 @@ function applyEvent(
     current_stage: newCurrentStage,
     completed_stages: newCompletedStages,
     developer_progress: newDeveloperProgress,
+    toolUseEvents: newToolUseEvents,
   };
 }
 

@@ -356,6 +356,80 @@ describe('developer_progress parsing', () => {
   });
 });
 
+// ── toolUseEvents map ─────────────────────────────────────────────────────────
+
+describe('toolUseEvents', () => {
+  function makeToolUseEvent(
+    id: string,
+    toolUseId: string,
+    toolName: string,
+  ) {
+    return {
+      event_id: id,
+      project_id: 'proj-1',
+      type: 'tool_use' as const,
+      role: 'developer' as const,
+      timestamp: '2024-01-01T00:00:00Z',
+      payload: {
+        tool_use_id: toolUseId,
+        tool_name: toolName,
+        tool_input: { path: '/src/index.ts' },
+      },
+    };
+  }
+
+  it('adds a tool_use event to toolUseEvents map', () => {
+    const event = makeToolUseEvent('e1', 'tu-1', 'read_file');
+    const next = activeProjectReducer(state, { type: 'ADD_EVENT', payload: event });
+    expect(next.toolUseEvents.has('tu-1')).toBe(true);
+    expect(next.toolUseEvents.get('tu-1')?.payload.tool_name).toBe('read_file');
+  });
+
+  it('stores multiple tool_use events by their tool_use_id', () => {
+    const e1 = makeToolUseEvent('e1', 'tu-1', 'read_file');
+    const e2 = makeToolUseEvent('e2', 'tu-2', 'write_file');
+    const s1 = activeProjectReducer(state, { type: 'ADD_EVENT', payload: e1 });
+    const s2 = activeProjectReducer(s1, { type: 'ADD_EVENT', payload: e2 });
+    expect(s2.toolUseEvents.size).toBe(2);
+    expect(s2.toolUseEvents.get('tu-1')?.payload.tool_name).toBe('read_file');
+    expect(s2.toolUseEvents.get('tu-2')?.payload.tool_name).toBe('write_file');
+  });
+
+  it('does NOT add non-tool_use events to toolUseEvents map', () => {
+    const textEvent = makeEvent('e1', 'text');
+    const next = activeProjectReducer(state, { type: 'ADD_EVENT', payload: textEvent });
+    expect(next.toolUseEvents.size).toBe(0);
+  });
+
+  it('populates toolUseEvents from ADD_EVENTS batch', () => {
+    const events = [
+      makeToolUseEvent('e1', 'tu-1', 'bash'),
+      makeToolUseEvent('e2', 'tu-2', 'grep'),
+    ];
+    const next = activeProjectReducer(state, { type: 'ADD_EVENTS', payload: events });
+    expect(next.toolUseEvents.size).toBe(2);
+    expect(next.toolUseEvents.has('tu-1')).toBe(true);
+    expect(next.toolUseEvents.has('tu-2')).toBe(true);
+  });
+
+  it('resets toolUseEvents when SELECT_PROJECT is called', () => {
+    const event = makeToolUseEvent('e1', 'tu-1', 'read_file');
+    const withTool = activeProjectReducer(state, { type: 'ADD_EVENT', payload: event });
+    expect(withTool.toolUseEvents.size).toBe(1);
+
+    const reset = activeProjectReducer(withTool, {
+      type: 'SELECT_PROJECT',
+      payload: 'new-project',
+    });
+    expect(reset.toolUseEvents.size).toBe(0);
+  });
+
+  it('initialises toolUseEvents as empty Map', () => {
+    expect(state.toolUseEvents).toBeInstanceOf(Map);
+    expect(state.toolUseEvents.size).toBe(0);
+  });
+});
+
 // ── default branch ────────────────────────────────────────────────────────────
 
 describe('default', () => {
