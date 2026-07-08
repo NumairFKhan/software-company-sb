@@ -1,27 +1,31 @@
 /**
  * POST /api/bookings/[id]/cancel
  *
- * Cancels a confirmed (or pending) booking and handles the refund:
+ * Cancels a confirmed (or pending) booking and handles the refund.
  *
+ * Authorisation — one of the following must be satisfied:
+ *   a) Authenticated coach whose coach_id matches the booking.
+ *   b) Authenticated player whose player_id matches the booking.
+ *   c) Guest: body.guestEmail matches the booking's guest_email (guest flow).
+ *
+ * Refund policy (re-checked server-side at cancel time — never trust the client):
  *   > 24 hrs before slot_start:
- *     • Issues a full Stripe Refund via the stripe_payment_intent_id.
- *     • Updates booking status → cancelled.
- *     • Emails both player and coach with refund confirmation.
+ *     • Issues a full Stripe Refund via stripe_payment_intent_id.
+ *     • Emails both parties noting a refund was issued.
  *
  *   ≤ 24 hrs before slot_start:
- *     • No refund issued (per cancellation policy).
- *     • Updates booking status → cancelled.
- *     • Emails both player and coach noting no refund.
+ *     • No refund.
+ *     • Emails both parties noting no refund per policy.
  *
- * Request body:
- *   { guestEmail: string }   — required for guest bookings to verify ownership
- *
- * Idempotency: if the booking is already cancelled, returns 200 immediately.
+ * Idempotency: already-cancelled bookings return 200 immediately.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
-import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
+import {
+  getSupabaseServerClient,
+  getSupabaseServiceRoleClient,
+} from "@/lib/supabase/server";
 import { sendEmail } from "@/lib/resend";
 
 export const dynamic = "force-dynamic";
@@ -50,21 +54,27 @@ export async function POST(
 ) {
   const bookingId = params.id;
 
-  // ── Parse request body ───────────────────────────────────────────────────
+  // ── Parse request body (optional for authenticated users) ────────────────
   let body: { guestEmail?: string } = {};
   try {
     body = await request.json();
   } catch {
-    // Body is optional; allow empty JSON bodies
+    // Body is optional for authenticated cancellations
   }
 
-  const supabase = getSupabaseServiceRoleClient();
+  // ── Try to identify authenticated requester ────────────────────────────
+  const supabaseAuth = getSupabaseServerClient();
+  const {
+    data: { user: authUser },
+  } = await supabaseAuth.auth.getUser();
 
-  // ── Fetch booking ────────────────────────────────────────────────────────
-  const { data: booking, error: fetchError } = await supabase
+  const serviceClient = getSupabaseServiceRoleClient();
+
+  // ── Fetch booking ─────────────────────────────────────────────────────────
+  const { data: booking, error: fetchError } = await serviceClient
     .from("bookings")
     .select(
-      "id, coach_id, slot_start, slot_end, status, hourly_rate, guest_name, guest_email, stripe_payment_intent_id"
+      "id, coach_id, player_id, slot_start, slot_end, status, hourly_rate, guest_name, guest_email, stripe_payment_intent_id"
     )
     .eq("id", bookingId)
     .single();
@@ -73,24 +83,70 @@ export async function POST(
     return NextResponse.json({ error: "Booking not found" }, { status: 404 });
   }
 
-  // ── Idempotency: already cancelled ───────────────────────────────────────
+  // ── Idempotency: already cancelled ────────────────────────────────────────
   if (booking.status === "cancelled") {
-    return NextResponse.json({ cancelled: true, refunded: false, message: "Already cancelled" });
+    return NextResponse.json({
+      cancelled: true,
+      refunded: false,
+      message: "Already cancelled",
+    });
   }
 
-  // ── Verify guest email ownership (for guest bookings) ────────────────────
-  if (booking.guest_email) {
+  // ── Authorization check ───────────────────────────────────────────────────
+  let authorised = false;
+
+  if (authUser) {
+    // Path A: authenticated coach
+    const { data: coachRow } = await serviceClient
+      .from("coaches")
+      .select("id")
+      .eq("user_id", authUser.id)
+      .eq("id", booking.coach_id)
+      .maybeSingle();
+
+    if (coachRow) {
+      authorised = true;
+    }
+
+    // Path B: authenticated player
+    if (!authorised && booking.player_id) {
+      const { data: playerRow } = await serviceClient
+        .from("players")
+        .select("id")
+        .eq("user_id", authUser.id)
+        .eq("id", booking.player_id)
+        .maybeSingle();
+
+      if (playerRow) {
+        authorised = true;
+      }
+    }
+  }
+
+  // Path C: guest email verification (unauthenticated guest flow)
+  if (!authorised && booking.guest_email) {
     const providedEmail = body.guestEmail?.trim().toLowerCase();
     const expectedEmail = booking.guest_email.toLowerCase();
-    if (!providedEmail || providedEmail !== expectedEmail) {
+    if (providedEmail && providedEmail === expectedEmail) {
+      authorised = true;
+    }
+  }
+
+  if (!authorised) {
+    if (booking.guest_email && !authUser) {
+      // Unauthenticated request for a guest booking — give the email hint
       return NextResponse.json(
         { error: "Provide the email address used when booking to cancel." },
         { status: 403 }
       );
     }
+    return NextResponse.json(
+      { error: "You are not authorised to cancel this booking." },
+      { status: 403 }
+    );
   }
 
-  // ── Determine refund eligibility ──────────────────────────────────────────
+  // ── Determine refund eligibility (server-side re-check) ─────────────────
   const now = Date.now();
   const slotStart = new Date(booking.slot_start).getTime();
   const isEligibleForRefund = slotStart - now > TWENTY_FOUR_HOURS_MS;
@@ -99,24 +155,25 @@ export async function POST(
   let refundError: string | null = null;
 
   if (isEligibleForRefund && booking.stripe_payment_intent_id) {
-    // ── Issue full Stripe Refund ───────────────────────────────────────────
     const stripe = getStripe();
     try {
       await stripe.refunds.create({
         payment_intent: booking.stripe_payment_intent_id,
-        // No amount specified → full refund
       });
       refundIssued = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error("[bookings/cancel] Stripe refund failed:", { bookingId, message });
+      console.error("[bookings/cancel] Stripe refund failed:", {
+        bookingId,
+        message,
+      });
       refundError = message;
-      // Continue to mark cancelled even if refund fails; log for manual resolution.
+      // Continue to mark cancelled even if refund fails; flag for manual resolution.
     }
   }
 
   // ── Mark booking as cancelled ─────────────────────────────────────────────
-  const { error: updateError } = await supabase
+  const { error: updateError } = await serviceClient
     .from("bookings")
     .update({ status: "cancelled" })
     .eq("id", bookingId);
@@ -130,7 +187,7 @@ export async function POST(
   }
 
   // ── Load coach for emails ─────────────────────────────────────────────────
-  const { data: coach } = await supabase
+  const { data: coach } = await serviceClient
     .from("coaches")
     .select("full_name, email")
     .eq("id", booking.coach_id)
@@ -156,7 +213,7 @@ export async function POST(
     APP_URL: appUrl,
   };
 
-  // Player cancellation email
+  // Player/guest cancellation email
   if (booking.guest_email) {
     await sendEmail({
       to: booking.guest_email,

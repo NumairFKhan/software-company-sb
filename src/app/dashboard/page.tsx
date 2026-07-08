@@ -54,6 +54,26 @@ export default async function DashboardPage() {
 
         {/* Quick-action cards */}
         <div className="grid gap-4 sm:grid-cols-2">
+          {/* My Schedule (bookings) */}
+          <Link
+            href="/dashboard/coach"
+            className="group flex flex-col gap-2 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-gray-100 transition hover:shadow-md hover:ring-blue-200"
+          >
+            <span className="text-2xl" aria-hidden="true">
+              📅
+            </span>
+            <h2 className="text-base font-semibold text-gray-900 group-hover:text-blue-600">
+              My schedule
+            </h2>
+            <p className="text-sm text-gray-500">
+              View upcoming and past sessions in a day/week calendar. See player
+              details for each booking.
+            </p>
+            <span className="mt-auto text-sm font-medium text-blue-600 group-hover:underline">
+              View schedule →
+            </span>
+          </Link>
+
           {/* Availability */}
           <Link
             href="/dashboard/availability"
