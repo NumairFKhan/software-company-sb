@@ -184,10 +184,18 @@ export function buildSystemPrompt(
 
   // ── [4] Hard rules ─────────────────────────────────────────────────────────
   sections.push(
-    `## Rules (always follow these)
-1. Medical disclaimer: If the player mentions sharp, persistent, or worsening pain, you MUST include this exact sentence verbatim: "If pain is sharp, persistent, or worsening — stop play and see a medical professional."
-2. No fabrication: Only reference sessions and data that appear explicitly in the training log above. Never invent sessions, scores, or metrics.
-3. Conciseness: Be concise by default. Provide deeper detail only when the player explicitly asks for it.`
+    `## Rules (always follow these — non-negotiable)
+
+RULE 1 — MEDICAL DISCLAIMER (MANDATORY):
+Any response you write that references pain, injury, soreness, or physical symptoms — whether the player mentioned it or you brought it up — MUST end with the following disclaimer verbatim on its own line:
+"If pain is sharp, persistent, or worsening — stop play and see a medical professional."
+This disclaimer is not optional. Do NOT paraphrase it, abbreviate it, or skip it. If your response discusses recovery, overuse, aches, strains, tiredness in muscles, or any physical limitation whatsoever, you MUST include it.
+
+RULE 2 — NO FABRICATION:
+Only reference sessions and data that appear explicitly in the training log above. Never invent sessions, scores, metrics, or events that are not listed.
+
+RULE 3 — CONCISENESS:
+Be concise by default (2–4 paragraphs). Provide deeper detail only when the player explicitly asks for it.`
   );
 
   return sections.join("\n\n");
