@@ -1,4 +1,5 @@
 import { sendMagicLink } from "./actions";
+import { GoogleSignInButton } from "@/components/GoogleSignInButton";
 
 interface LoginPageProps {
   searchParams: Promise<{ message?: string; error?: string }>;
@@ -64,32 +65,53 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </div>
         )}
 
-        <form action={sendMagicLink} className="space-y-4">
-          <div>
-            <label
-              htmlFor="email"
-              className="block text-sm font-medium text-slate-300 mb-1.5"
-            >
-              Email address
-            </label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              required
-              autoComplete="email"
-              placeholder="you@example.com"
-              className="w-full rounded-lg bg-slate-800 border border-slate-700 text-white placeholder-slate-500 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent transition"
-            />
+        {/*
+          Google OAuth sign-in button.
+          Rendered only when NEXT_PUBLIC_GOOGLE_OAUTH_ENABLED=true.
+          When hidden, the magic-link form below is the sole sign-in method.
+        */}
+        <div className="space-y-4">
+          <GoogleSignInButton />
+
+          {/* Divider — always rendered so the form is always accessible.
+              Visually reads as "or continue with email" when the Google button
+              is visible, and as "sign in with email" when it is not. */}
+          <div className="flex items-center gap-3" aria-hidden="true">
+            <div className="flex-1 border-t border-slate-700" />
+            <span className="text-xs text-slate-500 whitespace-nowrap">
+              or continue with email
+            </span>
+            <div className="flex-1 border-t border-slate-700" />
           </div>
 
-          <button
-            type="submit"
-            className="w-full bg-green-600 hover:bg-green-500 active:bg-green-700 text-white font-semibold rounded-lg px-4 py-2.5 text-sm transition-colors"
-          >
-            Send magic link
-          </button>
-        </form>
+          {/* ── Magic-link email form ───────────────────────────────────── */}
+          <form action={sendMagicLink} className="space-y-4">
+            <div>
+              <label
+                htmlFor="email"
+                className="block text-sm font-medium text-slate-300 mb-1.5"
+              >
+                Email address
+              </label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                required
+                autoComplete="email"
+                placeholder="you@example.com"
+                className="w-full rounded-lg bg-slate-800 border border-slate-700 text-white placeholder-slate-500 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent transition"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-green-600 hover:bg-green-500 active:bg-green-700 text-white font-semibold rounded-lg px-4 py-2.5 text-sm transition-colors"
+            >
+              Send magic link
+            </button>
+          </form>
+        </div>
       </div>
 
       <p className="mt-6 text-xs text-slate-600 text-center max-w-xs">

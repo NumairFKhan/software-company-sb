@@ -250,6 +250,34 @@ export interface Database {
         };
         Relationships: [];
       };
+
+      google_tokens: {
+        Row: {
+          id: string;
+          user_id: string;
+          access_token: string;
+          refresh_token: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          access_token: string;
+          refresh_token?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          access_token?: string;
+          refresh_token?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -295,3 +323,10 @@ export type DailyRecommendationInsert =
   Database["public"]["Tables"]["daily_recommendations"]["Insert"];
 export type DailyRecommendationUpdate =
   Database["public"]["Tables"]["daily_recommendations"]["Update"];
+
+export type GoogleToken =
+  Database["public"]["Tables"]["google_tokens"]["Row"];
+export type GoogleTokenInsert =
+  Database["public"]["Tables"]["google_tokens"]["Insert"];
+export type GoogleTokenUpdate =
+  Database["public"]["Tables"]["google_tokens"]["Update"];
