@@ -82,6 +82,8 @@ export interface Booking {
   hourly_rate: number;
   stripe_payment_intent_id: string | null;
   stripe_checkout_session_id: string | null;
+  /** Set by the daily cron job once the coach payout Transfer has been created. */
+  stripe_transfer_id: string | null;
   guest_name: string | null;
   guest_email: string | null;
   notes: string | null;
