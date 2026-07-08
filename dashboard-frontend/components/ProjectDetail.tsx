@@ -7,7 +7,8 @@ import { getProject } from '@/lib/api';
 import { getWsBaseUrl } from '@/lib/api/client';
 import type { PipelineEvent } from '@/types';
 // PipelineEvent used for JSON cast in onMessage; explicit import kept for clarity.
-import { ChatPlaceholder } from '@/components/ChatPlaceholder';
+import { ChatPanel } from '@/components/ChatPanel';
+import { ApprovalCard } from '@/components/ApprovalCard';
 import { StageTracker } from '@/components/StageTracker';
 
 // ── WS status indicator dot ────────────────────────────────────────────────────
@@ -159,8 +160,24 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
         )}
       </div>
 
-      {/* ── Chat placeholder (Ticket 4) ── */}
-      <ChatPlaceholder />
+      {/* ── Inline approval cards ── */}
+      {/* Cards are driven by state.approvals (Map<approval_id, ApprovalRequest>),
+          populated by approval_request / approval_resolved events in the reducer.
+          Resolved approvals render as compact badges; pending ones show action buttons. */}
+      {state.approvals.size > 0 && (
+        <div className="flex-shrink-0 border-t border-gray-200 bg-gray-50 px-4 py-2 space-y-2 max-h-48 overflow-y-auto">
+          {Array.from(state.approvals.values()).map((approval) => (
+            <ApprovalCard
+              key={approval.approval_id}
+              approval={approval}
+              projectId={projectId}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* ── Chat panel (Ticket 4) ── */}
+      <ChatPanel />
     </div>
   );
 }
