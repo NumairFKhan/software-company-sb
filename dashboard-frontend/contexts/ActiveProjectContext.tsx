@@ -10,9 +10,11 @@ import React, {
 import type {
   Project,
   PipelineEvent,
+  PipelineStage,
   ApprovalRequest,
   ApprovalRequestEvent,
   ApprovalResolvedEvent,
+  StageTransitionEvent,
   TokenUsageEntry,
   WebSocketStatus,
 } from '@/types';
@@ -33,6 +35,15 @@ export interface ActiveProjectState {
   approvals: Map<string, ApprovalRequest>;
   tokenUsage: TokenUsageEntry[];
   wsStatus: WebSocketStatus;
+  /** The pipeline stage currently active (from the latest stage_transition event). */
+  current_stage: PipelineStage | null;
+  /** Stages that have been completed (in order of completion). */
+  completed_stages: PipelineStage[];
+  /**
+   * Parsed Developer sub-progress from the pattern /developer\[(\d+)\/(\d+)\]/i
+   * found in any event payload. Null until the pattern is first seen.
+   */
+  developer_progress: { current: number; total: number } | null;
 }
 
 export type ActiveProjectAction =
@@ -50,11 +61,22 @@ export const initialActiveProjectState: ActiveProjectState = {
   approvals: new Map(),
   tokenUsage: [],
   wsStatus: 'disconnected',
+  current_stage: null,
+  completed_stages: [],
+  developer_progress: null,
 };
+
+/** Regex to detect Developer ticket sub-progress in any event payload string. */
+const DEVELOPER_PROGRESS_RE = /developer\[(\d+)\/(\d+)\]/i;
 
 /**
  * Attempt to merge a single event into state.
  * Returns the updated state, or null if the event was a duplicate.
+ *
+ * Side-effects handled here (beyond deduplication):
+ * - approval_request / approval_resolved → approvals map
+ * - stage_transition → current_stage and completed_stages
+ * - Any event payload → developer_progress (scanned for developer[i/N] pattern)
  */
 function applyEvent(
   state: ActiveProjectState,
@@ -66,7 +88,11 @@ function applyEvent(
   newEventIds.add(event.event_id);
   const newEvents = [...state.events, event];
   let newApprovals = state.approvals;
+  let newCurrentStage = state.current_stage;
+  let newCompletedStages = state.completed_stages;
+  let newDeveloperProgress = state.developer_progress;
 
+  // ── Approval handling ──────────────────────────────────────────────────────
   if (event.type === 'approval_request') {
     // Narrow to ApprovalRequestEvent so payload is typed as ApprovalRequest.
     const approvalEvent = event as ApprovalRequestEvent;
@@ -85,11 +111,37 @@ function applyEvent(
     }
   }
 
+  // ── Stage transition handling ──────────────────────────────────────────────
+  if (event.type === 'stage_transition') {
+    const stageEvent = event as StageTransitionEvent;
+    newCurrentStage = stageEvent.payload.stage;
+    if (
+      stageEvent.payload.previous_stage &&
+      !newCompletedStages.includes(stageEvent.payload.previous_stage)
+    ) {
+      newCompletedStages = [...newCompletedStages, stageEvent.payload.previous_stage];
+    }
+  }
+
+  // ── Developer progress parsing (any event payload) ─────────────────────────
+  // The backend may embed a progress string like "developer[3/7]" in any event.
+  const payloadStr = JSON.stringify(event.payload);
+  const devMatch = payloadStr.match(DEVELOPER_PROGRESS_RE);
+  if (devMatch) {
+    newDeveloperProgress = {
+      current: parseInt(devMatch[1], 10),
+      total: parseInt(devMatch[2], 10),
+    };
+  }
+
   return {
     ...state,
     events: newEvents,
     eventIds: newEventIds,
     approvals: newApprovals,
+    current_stage: newCurrentStage,
+    completed_stages: newCompletedStages,
+    developer_progress: newDeveloperProgress,
   };
 }
 

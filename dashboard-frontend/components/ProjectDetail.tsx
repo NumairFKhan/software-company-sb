@@ -8,6 +8,7 @@ import { getWsBaseUrl } from '@/lib/api/client';
 import type { PipelineEvent } from '@/types';
 // PipelineEvent used for JSON cast in onMessage; explicit import kept for clarity.
 import { ChatPlaceholder } from '@/components/ChatPlaceholder';
+import { StageTracker } from '@/components/StageTracker';
 
 // ── WS status indicator dot ────────────────────────────────────────────────────
 
@@ -122,6 +123,13 @@ function ProjectDetailContent({ projectId }: { projectId: string }) {
           </div>
         </div>
       </div>
+
+      {/* ── Stage tracker ── */}
+      <StageTracker
+        current_stage={state.current_stage}
+        completed_stages={state.completed_stages}
+        developer_progress={state.developer_progress}
+      />
 
       {/* ── Event feed (stub — Ticket 5 will flesh this out) ── */}
       <div className="flex-1 overflow-y-auto p-4 min-h-0">
