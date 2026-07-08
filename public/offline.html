@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="theme-color" content="#16a34a" />
+  <title>You're Offline – CourtCoach AI</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background-color: #0f172a;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 2rem;
+      text-align: center;
+      gap: 1.5rem;
+    }
+
+    .icon {
+      width: 80px;
+      height: 80px;
+      background-color: #16a34a;
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.5rem;
+      flex-shrink: 0;
+    }
+
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: #f8fafc;
+      line-height: 1.2;
+    }
+
+    p {
+      font-size: 1rem;
+      color: #94a3b8;
+      max-width: 320px;
+      line-height: 1.6;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background-color: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 0.5rem 1rem;
+      font-size: 0.875rem;
+      color: #64748b;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      background-color: #ef4444;
+      border-radius: 50%;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .retry-btn {
+      display: inline-block;
+      background-color: #16a34a;
+      color: #fff;
+      padding: 0.75rem 1.75rem;
+      border: none;
+      border-radius: 0.5rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background-color 0.15s ease;
+    }
+
+    .retry-btn:hover {
+      background-color: #15803d;
+    }
+
+    small {
+      font-size: 0.75rem;
+      color: #475569;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">🎾</div>
+
+    <div>
+      <h1>You're offline</h1>
+    </div>
+
+    <p>
+      No internet connection detected. Connect to a network and try again —
+      your session data and progress are safely stored in the cloud.
+    </p>
+
+    <div class="badge">
+      <span class="dot"></span>
+      No connection
+    </div>
+
+    <button class="retry-btn" onclick="window.location.reload()">
+      Try again
+    </button>
+
+    <small>CourtCoach AI — your tennis training companion</small>
+  </div>
+</body>
+</html>
