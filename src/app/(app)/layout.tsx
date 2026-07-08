@@ -59,7 +59,7 @@ export default async function AppLayout({
             Log Session
           </Link>
           <Link
-            href="/ask-coach"
+            href="/chat"
             className="text-sm text-slate-300 hover:text-green-400 transition-colors hidden sm:block"
           >
             Ask Coach
@@ -84,7 +84,7 @@ export default async function AppLayout({
             Log Session
           </Link>
           <Link
-            href="/ask-coach"
+            href="/chat"
             className="flex-1 py-2 text-center text-xs text-slate-400 hover:text-green-400 transition-colors"
           >
             Ask Coach

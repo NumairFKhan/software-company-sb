@@ -104,6 +104,34 @@ export interface Database {
         Relationships: [];
       };
 
+      chat_messages: {
+        Row: {
+          id: string;
+          user_id: string;
+          session_id: string;
+          role: "user" | "assistant";
+          content: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          session_id: string;
+          role: "user" | "assistant";
+          content: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          session_id?: string;
+          role?: "user" | "assistant";
+          content?: string;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+
       session_logs: {
         Row: {
           id: string;
@@ -185,3 +213,8 @@ export type SessionLogInsert =
   Database["public"]["Tables"]["session_logs"]["Insert"];
 export type SessionLogUpdate =
   Database["public"]["Tables"]["session_logs"]["Update"];
+
+export type ChatMessage =
+  Database["public"]["Tables"]["chat_messages"]["Row"];
+export type ChatMessageInsert =
+  Database["public"]["Tables"]["chat_messages"]["Insert"];

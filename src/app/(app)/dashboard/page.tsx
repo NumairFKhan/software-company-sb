@@ -94,7 +94,7 @@ export default async function DashboardPage() {
               desc: "Record today's training",
             },
             {
-              href: "/ask-coach",
+              href: "/chat",
               icon: "🤖",
               title: "Ask Coach",
               desc: "Get AI-powered advice",
