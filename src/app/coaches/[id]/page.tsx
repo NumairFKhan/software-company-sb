@@ -10,6 +10,7 @@
  */
 import { notFound } from "next/navigation";
 import Image from "next/image";
+import type { Metadata } from "next";
 import { createClient } from "@supabase/supabase-js";
 import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import type { Coach, RecurringSlot } from "@/lib/database.types";
@@ -26,6 +27,46 @@ function getAnonClient() {
 
 interface Props {
   params: { id: string };
+}
+
+/**
+ * generateMetadata — SSR <head> for SEO on the public coach profile page.
+ * Provides coach name and bio in <title> and <meta description>.
+ */
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const supabase = getAnonClient();
+
+  const { data: coach } = await supabase
+    .from("coaches")
+    .select("full_name, bio, sport, zip")
+    .eq("id", params.id)
+    .eq("onboarding_complete", true)
+    .single();
+
+  if (!coach) {
+    return { title: "Coach Not Found | CourtSide" };
+  }
+
+  const sportLabel = coach.sport ? `${coach.sport} ` : "";
+  const locationLabel = coach.zip ? ` near ${coach.zip}` : "";
+  const title = `${coach.full_name} — ${sportLabel}Coach${locationLabel} | CourtSide`;
+
+  const description =
+    coach.bio && coach.bio.length > 0
+      ? coach.bio.length <= 160
+        ? coach.bio
+        : `${coach.bio.slice(0, 157)}…`
+      : `Book a lesson with ${coach.full_name} on CourtSide.`;
+
+  return {
+    title,
+    description,
+    openGraph: {
+      title,
+      description,
+      type: "profile",
+    },
+  };
 }
 
 export default async function CoachProfilePage({ params }: Props) {
