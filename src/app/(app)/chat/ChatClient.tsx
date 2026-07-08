@@ -20,6 +20,10 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  AssistantBubble,
+  UserBubble,
+} from "@/components/ChatBubbles";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -52,62 +56,6 @@ function getOrCreateSessionId(): string {
     // sessionStorage unavailable (private mode in some browsers) — use in-memory
     return Math.random().toString(36).slice(2);
   }
-}
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function TypingIndicator() {
-  return (
-    <div
-      className="flex items-center gap-1 px-1 py-1"
-      aria-label="Coach is typing"
-    >
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="inline-block w-2 h-2 rounded-full bg-slate-500 animate-bounce"
-          style={{ animationDelay: `${i * 150}ms` }}
-        />
-      ))}
-    </div>
-  );
-}
-
-function UserBubble({ content }: { content: string }) {
-  return (
-    <div className="flex justify-end">
-      <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-green-700 px-4 py-2.5 text-sm text-white leading-relaxed shadow-sm">
-        {content}
-      </div>
-    </div>
-  );
-}
-
-function AssistantBubble({
-  content,
-  streaming,
-}: {
-  content: string;
-  streaming?: boolean;
-}) {
-  return (
-    <div className="flex justify-start gap-2.5">
-      {/* Coach avatar */}
-      <div
-        className="shrink-0 mt-0.5 w-7 h-7 rounded-full bg-green-800 flex items-center justify-center text-sm"
-        aria-hidden="true"
-      >
-        🎾
-      </div>
-
-      <div className="max-w-[80%] rounded-2xl rounded-tl-sm bg-slate-800 border border-slate-700 px-4 py-2.5 text-sm text-slate-100 leading-relaxed shadow-sm">
-        {content.length > 0 ? (
-          <span style={{ whiteSpace: "pre-wrap" }}>{content}</span>
-        ) : null}
-        {streaming && (content.length === 0 ? <TypingIndicator /> : <span className="ml-0.5 inline-block w-0.5 h-4 bg-green-400 animate-pulse align-middle" aria-hidden="true" />)}
-      </div>
-    </div>
-  );
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
