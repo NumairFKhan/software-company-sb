@@ -37,11 +37,37 @@ export interface Player {
 export interface AvailabilitySlot {
   id: string;
   coach_id: string;
-  slot_start: string;
-  slot_end: string;
+  /** Concrete start datetime (non-recurring bookable slots). Nullable for recurring templates. */
+  slot_start: string | null;
+  /** Concrete end datetime (non-recurring bookable slots). Nullable for recurring templates. */
+  slot_end: string | null;
   is_booked: boolean;
+  /** 0 = Sunday … 6 = Saturday (recurring slots only) */
+  day_of_week: number | null;
+  /** HH:MM (24-hour) — recurring slots only */
+  start_time: string | null;
+  /** HH:MM (24-hour) — recurring slots only */
+  end_time: string | null;
+  is_recurring: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/** A recurring weekly availability template row */
+export interface RecurringSlot {
+  id: string;
+  coach_id: string;
+  day_of_week: number;   // 0–6
+  start_time: string;    // "HH:MM"
+  end_time: string;      // "HH:MM"
+}
+
+/** An open booking window derived from recurring availability (concrete date + time) */
+export interface OpenSlot {
+  date: string;           // "YYYY-MM-DD"
+  start_time: string;     // "HH:MM"
+  end_time: string;       // "HH:MM"
+  start_datetime: string; // ISO string (for display / booking)
 }
 
 export interface Booking {
@@ -80,6 +106,7 @@ export interface Database {
         Insert: Omit<AvailabilitySlot, "id" | "created_at" | "updated_at"> & {
           id?: string;
           is_booked?: boolean;
+          is_recurring?: boolean;
         };
         Update: Partial<Omit<AvailabilitySlot, "id" | "created_at">>;
       };

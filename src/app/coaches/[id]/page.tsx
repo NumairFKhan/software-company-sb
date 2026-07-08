@@ -5,11 +5,15 @@
  * - Displays an "Unverified coach" badge with tooltip for all live profiles
  *   (Stripe KYC is complete, but the platform has not performed additional
  *   credential verification).
+ * - Derives open booking slots for the next 4 weeks from recurring
+ *   availability_slots, excluding times already covered by confirmed bookings.
  */
 import { notFound } from "next/navigation";
 import Image from "next/image";
 import { createClient } from "@supabase/supabase-js";
-import type { Coach } from "@/lib/database.types";
+import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
+import type { Coach, RecurringSlot } from "@/lib/database.types";
+import { deriveOpenSlots, groupSlotsByDate, formatDate, formatTime } from "@/lib/availability";
 
 /** We use the anon key (no cookies needed) to read public coach rows. */
 function getAnonClient() {
@@ -40,6 +44,36 @@ export default async function CoachProfilePage({ params }: Props) {
   }
 
   const typedCoach = coach as Coach;
+
+  // Load recurring availability slots and confirmed bookings server-side
+  const serviceClient = getSupabaseServiceRoleClient();
+
+  const [{ data: slotsData }, { data: bookingsData }] = await Promise.all([
+    serviceClient
+      .from("availability_slots")
+      .select("id, coach_id, day_of_week, start_time, end_time")
+      .eq("coach_id", params.id)
+      .eq("is_recurring", true),
+    serviceClient
+      .from("bookings")
+      .select("slot_start, slot_end")
+      .eq("coach_id", params.id)
+      .eq("status", "confirmed")
+      .gte("slot_end", new Date().toISOString()),
+  ]);
+
+  const recurringSlots: RecurringSlot[] = (slotsData ?? []).filter(
+    (s): s is RecurringSlot =>
+      s.day_of_week !== null && s.start_time !== null && s.end_time !== null
+  );
+
+  const confirmedBookings = (bookingsData ?? []).filter(
+    (b): b is { slot_start: string; slot_end: string } =>
+      typeof b.slot_start === "string" && typeof b.slot_end === "string"
+  );
+
+  const openSlots = deriveOpenSlots(recurringSlots, confirmedBookings, 4);
+  const slotsByDate = groupSlotsByDate(openSlots).slice(0, 14); // show up to 14 days with slots
 
   return (
     <main className="min-h-screen bg-gray-50 px-4 py-12">
@@ -122,6 +156,43 @@ export default async function CoachProfilePage({ params }: Props) {
               </button>
             </div>
           </div>
+        </div>
+
+        {/* ---------------------------------------------------------------- */}
+        {/* Open availability for the next 4 weeks                           */}
+        {/* ---------------------------------------------------------------- */}
+        <div className="mt-6 rounded-2xl bg-white p-6 shadow-md">
+          <h2 className="text-base font-semibold text-gray-900">
+            Upcoming availability
+          </h2>
+
+          {slotsByDate.length === 0 ? (
+            <p className="mt-3 text-sm text-gray-500">
+              {recurringSlots.length === 0
+                ? "This coach hasn't set their availability yet."
+                : "No open sessions in the next 4 weeks."}
+            </p>
+          ) : (
+            <div className="mt-3 space-y-4">
+              {slotsByDate.map(({ date, slots }) => (
+                <div key={date}>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                    {formatDate(date)}
+                  </p>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    {slots.map((slot) => (
+                      <span
+                        key={slot.start_datetime}
+                        className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700"
+                      >
+                        {formatTime(slot.start_time)} – {formatTime(slot.end_time)}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </main>
