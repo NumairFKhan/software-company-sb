@@ -49,6 +49,27 @@ export type SessionDetails =
   | RecoveryDetails
   | Record<string, Json>;
 
+// ── Daily recommendation shape ────────────────────────────────────────────────
+
+export interface DailyRecommendationContent {
+  session_goal: string;
+  warmup: string;
+  main_block: string;
+  secondary_drill: string;
+  fitness_note: string;
+  mental_focus: string;
+  cooldown: string;
+  estimated_duration_mins: number;
+}
+
+// ── Physical status derived from recovery logs ───────────────────────────────
+
+export type PhysicalStatus =
+  | "Feeling good"
+  | "Moderate fatigue"
+  | "Recovery day needed"
+  | "No recent recovery log";
+
 // ── Supabase Database type ───────────────────────────────────────────────────
 // Mirrors the schema in supabase/migrations/
 
@@ -100,6 +121,55 @@ export interface Database {
           available_days?: string[];
           session_length_minutes?: number;
           known_injuries?: string | null;
+        };
+        Relationships: [];
+      };
+
+      daily_recommendations: {
+        Row: {
+          id: string;
+          user_id: string;
+          recommendation_date: string; // DATE as ISO "YYYY-MM-DD"
+          created_at: string;
+          updated_at: string;
+          session_goal: string;
+          warmup: string;
+          main_block: string;
+          secondary_drill: string;
+          fitness_note: string;
+          mental_focus: string;
+          cooldown: string;
+          estimated_duration_mins: number;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          recommendation_date?: string;
+          created_at?: string;
+          updated_at?: string;
+          session_goal: string;
+          warmup: string;
+          main_block: string;
+          secondary_drill: string;
+          fitness_note: string;
+          mental_focus: string;
+          cooldown: string;
+          estimated_duration_mins: number;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          recommendation_date?: string;
+          created_at?: string;
+          updated_at?: string;
+          session_goal?: string;
+          warmup?: string;
+          main_block?: string;
+          secondary_drill?: string;
+          fitness_note?: string;
+          mental_focus?: string;
+          cooldown?: string;
+          estimated_duration_mins?: number;
         };
         Relationships: [];
       };
@@ -218,3 +288,10 @@ export type ChatMessage =
   Database["public"]["Tables"]["chat_messages"]["Row"];
 export type ChatMessageInsert =
   Database["public"]["Tables"]["chat_messages"]["Insert"];
+
+export type DailyRecommendation =
+  Database["public"]["Tables"]["daily_recommendations"]["Row"];
+export type DailyRecommendationInsert =
+  Database["public"]["Tables"]["daily_recommendations"]["Insert"];
+export type DailyRecommendationUpdate =
+  Database["public"]["Tables"]["daily_recommendations"]["Update"];
