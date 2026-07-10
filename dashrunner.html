@@ -52,9 +52,17 @@ const MAX_DT                = 0.05;  // 50ms cap; prevents tunneling on tab-blur
 const TRACK_FRAC   = 0.65;
 const GROUND_H     = 22;    // height of the ground strip at the bottom
 
-// Player visual placeholder (full entity in M2)
+// Player visual dimensions
 const PLAYER_W = 40;
 const PLAYER_H = 60;
+
+// ── M2: Player movement constants ────────────────────────────
+// Jump physics — tune these for "feels right":
+//   Peak height ≈ JUMP_VY² / (2 × GRAVITY) ≈ 820² / 5600 ≈ 120 px
+//   Air time     ≈ 2 × JUMP_VY / GRAVITY    ≈ 2 × 820 / 2800 ≈ 0.59 s
+const GRAVITY          = 2800;  // px/s² downward acceleration
+const JUMP_VY          = -820;  // px/s initial upward velocity (negative = up)
+const LANE_COOLDOWN_MS = 100;   // ms between allowed lane-switch inputs
 
 // ── GameState ─────────────────────────────────────────────────
 // Single source of truth for every subsequent ticket to read/write.
@@ -99,6 +107,10 @@ let laneW     = 0;   // width of one lane in px
 // Scrolling state
 let trackScrollX = 0;  // cumulative scroll distance in px; wraps every frame modulo
 
+// ── M2: Player movement state ─────────────────────────────────
+let laneCooldown = 0;   // ms remaining; prevents rapid double-tap lane switches
+let slideHeld    = false; // true while ArrowDown/S key is held down
+
 // ── Helpers ───────────────────────────────────────────────────
 function getLaneCenterX(lane) {
     return (lane + 0.5) * laneW;
@@ -109,17 +121,120 @@ function clamp(val, lo, hi) {
 }
 
 // ── Player hitbox ─────────────────────────────────────────────
-// M3 will shrink these 10–15% for generous collision.
-// M1: full sprite bounds.
+// Hitbox varies by player state per the technical spec:
+//   run:   full width, full height
+//   jump:  slightly narrower (75% width) — generous feel on aerial passes
+//   slide: full width, half height, anchored to ground
+// M3 will add an additional 10–15% inset shrink for generous AABB collision.
 function updatePlayerHitbox() {
-    const ph = Player.state === 'slide' ? Player.height * 0.5 : Player.height;
-    const py = Player.state === 'slide'
-        ? groundY - ph
-        : Player.y;
-    Player.hitbox.x = Player.x - Player.width  * 0.5;
+    let pw, ph, px, py;
+
+    if (Player.state === 'slide') {
+        ph = Player.height * 0.5;
+        py = groundY - ph;
+        pw = Player.width;
+    } else if (Player.state === 'jump') {
+        // Narrower hitbox while airborne — makes clearing obstacles feel fairer
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width * 0.75;
+    } else {
+        // 'run' — full sprite bounds
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width;
+    }
+
+    px = Player.x - pw * 0.5;
+    Player.hitbox.x = px;
     Player.hitbox.y = py;
-    Player.hitbox.w = Player.width;
+    Player.hitbox.w = pw;
     Player.hitbox.h = ph;
+}
+
+// ── M2: Input action handler ──────────────────────────────────
+// Single entry-point for all player actions — wired to both keyboard (here)
+// and touch gestures (M5 will reuse this same function).
+// All state-machine transitions enforced here.
+function handleInput(action) {
+    if (GameState.phase !== 'playing') return;
+
+    switch (action) {
+        case 'left':
+            if (laneCooldown <= 0 && Player.lane > 0) {
+                Player.lane--;
+                Player.x      = getLaneCenterX(Player.lane);
+                laneCooldown  = LANE_COOLDOWN_MS;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'right':
+            if (laneCooldown <= 0 && Player.lane < NUM_LANES - 1) {
+                Player.lane++;
+                Player.x      = getLaneCenterX(Player.lane);
+                laneCooldown  = LANE_COOLDOWN_MS;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'jump':
+            // Valid only from 'run'; cannot jump while sliding
+            if (Player.state === 'run') {
+                Player.state = 'jump';
+                Player.vy    = JUMP_VY;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'slideStart':
+            // Valid only from 'run'; cannot slide mid-air
+            if (Player.state === 'run') {
+                Player.state = 'slide';
+                slideHeld    = true;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'slideEnd':
+            slideHeld = false;
+            // Only exit slide if we are still in slide state
+            // (if we somehow jumped off before the key released, no-op)
+            if (Player.state === 'slide') {
+                Player.state = 'run';
+                Player.y     = groundY - Player.height;
+                updatePlayerHitbox();
+            }
+            break;
+    }
+}
+
+// ── M2: Player physics update ─────────────────────────────────
+// Called every frame (dt in seconds) while phase === 'playing'.
+function updatePlayer(dt) {
+    // Tick down the lane-switch cooldown
+    if (laneCooldown > 0) {
+        laneCooldown = Math.max(0, laneCooldown - dt * 1000);
+    }
+
+    if (Player.state === 'jump') {
+        // Apply gravity and integrate position
+        Player.vy += GRAVITY * dt;
+        Player.y  += Player.vy  * dt;
+
+        const landY = groundY - Player.height;
+        if (Player.y >= landY) {
+            // Landed — choose run or slide depending on whether key is still held
+            Player.y     = landY;
+            Player.vy    = 0;
+            Player.state = slideHeld ? 'slide' : 'run';
+        }
+    } else {
+        // Keep player anchored to the ground when not airborne
+        Player.y = groundY - Player.height;
+    }
+
+    updatePlayerHitbox();
 }
 
 // ── Resize ────────────────────────────────────────────────────
@@ -159,7 +274,10 @@ function update(dt) {
     // Advance the scroll position (used by drawTrack to offset markers)
     trackScrollX += GameState.trackSpeed * dt;
 
-    // Tickets M2–M7 will update player, obstacles, coins, difficulty here.
+    // M2: player movement, jump arc, lane-switch cooldown
+    updatePlayer(dt);
+
+    // Tickets M3–M7 will update obstacles, coins, difficulty here.
 }
 
 // ── Draw ─────────────────────────────────────────────────────
@@ -272,34 +390,70 @@ function drawTrack(W, H) {
     ctx.stroke();
 }
 
-// ── Player placeholder ────────────────────────────────────────
-// Coloured rectangle in the centre lane at ground level.
-// M2 will replace this with a proper animated sprite.
+// ── Player ────────────────────────────────────────────────────
+// Rectangle-based representation with distinct visuals per state.
+// State colours:
+//   run   → bright cyan-green (default)
+//   jump  → yellow-green (airborne — clearly different, easy to read)
+//   slide → orange-amber (low/wide — signals ducked posture)
+// M3 will wire invincibility flash alpha oscillation.
 function drawPlayer() {
-    const pw = Player.width;
-    const ph = Player.state === 'slide' ? Player.height * 0.5 : Player.height;
-    const px = Player.x - pw * 0.5;
-    const py = Player.state === 'slide' ? groundY - ph : Player.y;
+    // Determine draw dimensions and position from current state
+    let pw, ph, px, py;
+    let bodyColor, outlineColor, detailColor;
+
+    if (Player.state === 'slide') {
+        ph = Player.height * 0.5;
+        py = groundY - ph;
+        pw = Player.width;
+        px = Player.x - pw * 0.5;
+        bodyColor    = '#ff9933';
+        outlineColor = '#cc6600';
+        detailColor  = '#cc5500';
+    } else if (Player.state === 'jump') {
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width * 0.75;   // narrower while airborne
+        px = Player.x - pw * 0.5;
+        bodyColor    = '#ccff33';
+        outlineColor = '#99cc00';
+        detailColor  = '#669900';
+    } else {
+        // 'run'
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width;
+        px = Player.x - pw * 0.5;
+        bodyColor    = '#00ff99';
+        outlineColor = '#00cc77';
+        detailColor  = '#009966';
+    }
 
     ctx.save();
 
-    // If invincible, M3 will oscillate this alpha — placeholder hook
+    // Invincibility flash — M3 will set Player.invincible; hook is live now
     ctx.globalAlpha = Player.invincible
         ? (Math.floor(performance.now() / 150) % 2 === 0 ? 1.0 : 0.3)
         : 1.0;
 
-    // Body fill — bright cyan-green so it's clearly visible on dark track
-    ctx.fillStyle   = '#00ff99';
+    // Body
+    ctx.fillStyle = bodyColor;
     ctx.fillRect(px, py, pw, ph);
 
     // Outline
-    ctx.strokeStyle = '#00cc77';
+    ctx.strokeStyle = outlineColor;
     ctx.lineWidth   = 2;
     ctx.strokeRect(px, py, pw, ph);
 
-    // Simple "face" bar in the top quarter — makes direction obvious
-    ctx.fillStyle = '#009966';
-    ctx.fillRect(px + pw * 0.15, py + ph * 0.06, pw * 0.70, ph * 0.18);
+    // "Face" bar in upper quarter — different position per state to imply posture
+    ctx.fillStyle = detailColor;
+    if (Player.state === 'slide') {
+        // Slide: face bar shifted to the front (left side) — leaning forward
+        ctx.fillRect(px + pw * 0.05, py + ph * 0.15, pw * 0.55, ph * 0.30);
+    } else {
+        // Run & jump: standard upper-face bar
+        ctx.fillRect(px + pw * 0.15, py + ph * 0.08, pw * 0.70, ph * 0.18);
+    }
 
     ctx.restore();
 }
@@ -433,12 +587,57 @@ function drawGameOverOverlay(W, H) {
 document.addEventListener('keydown', (e) => {
     if (GameState.phase === 'start') {
         startGame();
-    } else if (GameState.phase === 'dead') {
+        return;
+    }
+    if (GameState.phase === 'dead') {
         if (e.key === 'r' || e.key === 'R' || e.key === 'Enter') {
             restartGame();
         }
+        return;
     }
-    // In-game keys (lane switch, jump, slide) wired in M2.
+
+    // ── In-game keyboard controls (M2) ───────────────────────
+    // All three keyboard schemes: arrow keys, WASD, Space
+    switch (e.key) {
+        case 'ArrowLeft':
+        case 'a':
+        case 'A':
+            handleInput('left');
+            break;
+
+        case 'ArrowRight':
+        case 'd':
+        case 'D':
+            handleInput('right');
+            break;
+
+        case 'ArrowUp':
+        case 'w':
+        case 'W':
+        case ' ':                   // Space
+            e.preventDefault();     // stop page-scroll on Space / ArrowUp
+            handleInput('jump');
+            break;
+
+        case 'ArrowDown':
+        case 's':
+        case 'S':
+            e.preventDefault();     // stop page-scroll on ArrowDown
+            handleInput('slideStart');
+            break;
+    }
+});
+
+// keyup: release slide when ArrowDown/S is lifted
+document.addEventListener('keyup', (e) => {
+    if (GameState.phase !== 'playing') return;
+    switch (e.key) {
+        case 'ArrowDown':
+        case 's':
+        case 'S':
+            handleInput('slideEnd');
+            break;
+    }
 });
 
 // Tap: start or restart — attached to canvas to limit scope
@@ -474,6 +673,10 @@ function startGame() {
     Player.invincible      = false;
     Player.invincibleTimer = 0;
     updatePlayerHitbox();
+
+    // M2: reset movement state
+    laneCooldown = 0;
+    slideHeld    = false;
 
     trackScrollX = 0;
 }
