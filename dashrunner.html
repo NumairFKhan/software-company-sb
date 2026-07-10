@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>DashRunner</title>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+        }
+        canvas {
+            display: block;
+            /* CSS size = 100% so it fills the viewport visually;
+               the actual pixel dimensions are set in JS via canvas.width/height
+               to match window.innerWidth/innerHeight exactly. */
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+'use strict';
+// ============================================================
+//  DashRunner — Ticket M1: Canvas Scaffold & Scrolling Game Loop
+//
+//  Single self-contained HTML file. Zero external dependencies.
+//  Vanilla JS + HTML5 Canvas 2D. No build step, opens from file://.
+//
+//  Implements:
+//    • Full-screen canvas that resizes and redraws on window resize
+//    • requestAnimationFrame loop with dt clamped to 50ms (MAX_DT)
+//    • Scrolling 3-lane track background at constant speed
+//    • Static player rectangle centred in lane 1
+//    • GameState.phase routing: 'start' | 'playing' | 'dead'
+//    • Start screen + Game-Over screen stubs (canvas draws only,
+//      no innerHTML, no DOM string injection — security requirement)
+// ============================================================
+
+// ── Tuning constants ─────────────────────────────────────────
+const NUM_LANES             = 3;
+const INITIAL_TRACK_SPEED   = 300;   // px/sec — how fast the world scrolls left
+const MAX_DT                = 0.05;  // 50ms cap; prevents tunneling on tab-blur
+
+// Track occupies the bottom TRACK_FRAC of the canvas height;
+// sky fills the top portion.
+const TRACK_FRAC   = 0.65;
+const GROUND_H     = 22;    // height of the ground strip at the bottom
+
+// Player visual placeholder (full entity in M2)
+const PLAYER_W = 40;
+const PLAYER_H = 60;
+
+// ── GameState ─────────────────────────────────────────────────
+// Single source of truth for every subsequent ticket to read/write.
+// 'phase' drives which screen is rendered each frame.
+const GameState = {
+    phase: 'start',           // 'start' | 'playing' | 'dead'
+    distanceM: 0,             // metres travelled (displayed on HUD, M4)
+    trackSpeed: INITIAL_TRACK_SPEED,
+    score: 0,
+    coins: 0,
+    lives: 3,
+    activeEffect: null,       // { type: 'magnet'|'shield', remainingMs } — M4
+    spawnCursor: 0,           // world-X for next obstacle spawn — M3
+    elapsedPlayMs: 0,         // wall-clock play time; drives difficulty ramp — M7
+};
+
+// ── Player entity ─────────────────────────────────────────────
+// Full shape defined here so M2 can extend it without breaking M1.
+const Player = {
+    lane: 1,                  // 0=left  1=center  2=right
+    x: 0,                     // screen-X centre of sprite; updated by resize() & M2
+    y: 0,                     // screen-Y top of sprite; updated by resize() & M2
+    vy: 0,                    // vertical velocity for jump arc — M2
+    state: 'run',             // 'run' | 'jump' | 'slide' — M2
+    lives: 3,
+    invincible: false,
+    invincibleTimer: 0,       // ms remaining — M3
+    width: PLAYER_W,
+    height: PLAYER_H,
+    hitbox: { x: 0, y: 0, w: 0, h: 0 },
+};
+
+// ── Canvas & context ─────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+
+// Layout geometry — derived from canvas dimensions in resize()
+let trackTop  = 0;   // Y where the track surface begins
+let groundY   = 0;   // Y of the ground line (top of ground strip)
+let laneW     = 0;   // width of one lane in px
+
+// Scrolling state
+let trackScrollX = 0;  // cumulative scroll distance in px; wraps every frame modulo
+
+// ── Helpers ───────────────────────────────────────────────────
+function getLaneCenterX(lane) {
+    return (lane + 0.5) * laneW;
+}
+
+function clamp(val, lo, hi) {
+    return val < lo ? lo : val > hi ? hi : val;
+}
+
+// ── Player hitbox ─────────────────────────────────────────────
+// M3 will shrink these 10–15% for generous collision.
+// M1: full sprite bounds.
+function updatePlayerHitbox() {
+    const ph = Player.state === 'slide' ? Player.height * 0.5 : Player.height;
+    const py = Player.state === 'slide'
+        ? groundY - ph
+        : Player.y;
+    Player.hitbox.x = Player.x - Player.width  * 0.5;
+    Player.hitbox.y = py;
+    Player.hitbox.w = Player.width;
+    Player.hitbox.h = ph;
+}
+
+// ── Resize ────────────────────────────────────────────────────
+// Called on load and every window resize.
+// Sets canvas pixel dimensions, recomputes layout, redraws immediately
+// to avoid the blank-frame flash that occurs if we wait for the next rAF.
+function resize() {
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const H = canvas.height;
+    const W = canvas.width;
+
+    trackTop = Math.round(H * (1 - TRACK_FRAC));
+    groundY  = H - GROUND_H;
+    laneW    = W / NUM_LANES;
+
+    // Anchor player to ground in current lane
+    Player.x = getLaneCenterX(Player.lane);
+    Player.y = groundY - Player.height;
+    updatePlayerHitbox();
+
+    draw();  // immediate redraw — no blank frame on resize
+}
+
+// ── Update ────────────────────────────────────────────────────
+// Called every frame with delta-time already clamped to MAX_DT.
+function update(dt) {
+    if (GameState.phase !== 'playing') return;
+
+    GameState.elapsedPlayMs += dt * 1000;
+
+    // Convert scrolled pixels to metres (scale factor keeps displayed
+    // values human-friendly; 100 px ≈ 1 m at initial speed).
+    GameState.distanceM += GameState.trackSpeed * dt / 100;
+
+    // Advance the scroll position (used by drawTrack to offset markers)
+    trackScrollX += GameState.trackSpeed * dt;
+
+    // Tickets M2–M7 will update player, obstacles, coins, difficulty here.
+}
+
+// ── Draw ─────────────────────────────────────────────────────
+// Single entry point called each rAF tick.
+// Draw order: sky → track → player → UI overlay
+function draw() {
+    const W = canvas.width;
+    const H = canvas.height;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Game world renders on every frame regardless of phase;
+    // overlay screens are drawn on top.
+    drawSky(W, H);
+    drawTrack(W, H);
+    drawPlayer();
+
+    if (GameState.phase === 'start') {
+        drawStartOverlay(W, H);
+    } else if (GameState.phase === 'dead') {
+        drawGameOverOverlay(W, H);
+    }
+}
+
+// ── Sky ───────────────────────────────────────────────────────
+function drawSky(W, H) {
+    // Night-sky gradient above the track horizon
+    const grad = ctx.createLinearGradient(0, 0, 0, trackTop);
+    grad.addColorStop(0, '#0a1628');
+    grad.addColorStop(1, '#1a3a5c');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, trackTop);
+
+    // Warm horizon glow (subtle; fades into the track edge colour)
+    ctx.fillStyle = 'rgba(255, 120, 30, 0.12)';
+    ctx.fillRect(0, trackTop - 24, W, 24);
+}
+
+// ── Track ─────────────────────────────────────────────────────
+// Draws the road surface, scrolling lane markers, vertical lane dividers,
+// the ground strip, and the two border lines.
+function drawTrack(W, H) {
+    // ── Road surface ─────────────────────────────────────────
+    ctx.fillStyle = '#1e1e1e';
+    ctx.fillRect(0, trackTop, W, H - trackTop);
+
+    // Subtle alternating lane tints so lanes read as distinct columns
+    for (let i = 0; i < NUM_LANES; i++) {
+        ctx.fillStyle = i % 2 === 0
+            ? 'rgba(255,255,255,0.025)'
+            : 'rgba(0,0,0,0.04)';
+        ctx.fillRect(i * laneW, trackTop, laneW, groundY - trackTop);
+    }
+
+    // ── Scrolling road markers ────────────────────────────────
+    // Short horizontal rectangles that move right→left at trackSpeed,
+    // giving the visual impression of forward motion.
+    // They tile continuously: offset = trackScrollX % period so they wrap.
+    const mkW      = 52;    // dash width in px
+    const mkH      = 7;     // dash height in px
+    const period   = 170;   // px between successive dash starts
+    const mkMidY   = trackTop + (groundY - trackTop) * 0.5;  // vertical centre of road
+    const offset   = trackScrollX % period;
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
+
+    // Iterate enough steps to cover the full canvas width plus one period
+    // on each side so dashes are never clipped at the edges.
+    const count = Math.ceil(W / period) + 2;
+    for (let i = -1; i <= count; i++) {
+        const x = i * period - offset;
+        if (x + mkW > 0 && x < W) {
+            ctx.fillRect(x, mkMidY - mkH * 0.5, mkW, mkH);
+        }
+    }
+
+    // ── Lane dividers (vertical dashed lines) ────────────────
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.38)';
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([20, 14]);
+    for (let i = 1; i < NUM_LANES; i++) {
+        const x = i * laneW;
+        ctx.beginPath();
+        ctx.moveTo(x, trackTop + 6);
+        ctx.lineTo(x, groundY - 2);
+        ctx.stroke();
+    }
+    ctx.restore();
+
+    // ── Horizon border (top of track) ────────────────────────
+    ctx.strokeStyle = 'rgba(255, 150, 30, 0.70)';
+    ctx.lineWidth   = 3;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(0, trackTop);
+    ctx.lineTo(W, trackTop);
+    ctx.stroke();
+
+    // ── Ground strip ─────────────────────────────────────────
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(0, groundY, W, H - groundY);
+
+    // Ground border line (bottom of driveable surface)
+    ctx.strokeStyle = 'rgba(255, 150, 30, 0.65)';
+    ctx.lineWidth   = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(W, groundY);
+    ctx.stroke();
+}
+
+// ── Player placeholder ────────────────────────────────────────
+// Coloured rectangle in the centre lane at ground level.
+// M2 will replace this with a proper animated sprite.
+function drawPlayer() {
+    const pw = Player.width;
+    const ph = Player.state === 'slide' ? Player.height * 0.5 : Player.height;
+    const px = Player.x - pw * 0.5;
+    const py = Player.state === 'slide' ? groundY - ph : Player.y;
+
+    ctx.save();
+
+    // If invincible, M3 will oscillate this alpha — placeholder hook
+    ctx.globalAlpha = Player.invincible
+        ? (Math.floor(performance.now() / 150) % 2 === 0 ? 1.0 : 0.3)
+        : 1.0;
+
+    // Body fill — bright cyan-green so it's clearly visible on dark track
+    ctx.fillStyle   = '#00ff99';
+    ctx.fillRect(px, py, pw, ph);
+
+    // Outline
+    ctx.strokeStyle = '#00cc77';
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(px, py, pw, ph);
+
+    // Simple "face" bar in the top quarter — makes direction obvious
+    ctx.fillStyle = '#009966';
+    ctx.fillRect(px + pw * 0.15, py + ph * 0.06, pw * 0.70, ph * 0.18);
+
+    ctx.restore();
+}
+
+// ── Start screen overlay ──────────────────────────────────────
+// Drawn on top of the static game world. Uses canvas fillText only —
+// never innerHTML — to prevent stored-XSS if served from a shared host.
+function drawStartOverlay(W, H) {
+    // Semi-transparent veil
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.68)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    // ── Game title ───────────────────────────────────────────
+    const titleSz = clamp(Math.floor(H * 0.10), 32, 80);
+    ctx.font = `bold ${titleSz}px 'Courier New', monospace`;
+
+    // Drop shadow
+    ctx.fillStyle = 'rgba(255, 80, 0, 0.55)';
+    ctx.fillText('DASHRUNNER', W * 0.5 + 4, H * 0.27 + 4);
+    // Foreground
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText('DASHRUNNER', W * 0.5, H * 0.27);
+
+    // ── Tagline ───────────────────────────────────────────────
+    const tagSz = clamp(Math.floor(H * 0.028), 13, 22);
+    ctx.font      = `${tagSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#99ccff';
+    ctx.fillText('Dodge obstacles · Collect coins · Survive as long as you can', W * 0.5, H * 0.38);
+
+    // ── Controls cheat-sheet ─────────────────────────────────
+    const ctrlSz = clamp(Math.floor(H * 0.026), 12, 20);
+    ctx.font = `${ctrlSz}px 'Courier New', monospace`;
+
+    const rows = [
+        ['← A / D →',       'Switch lanes'],
+        ['↑  W  Space',      'Jump'],
+        ['↓  S',             'Slide / Duck'],
+        ['Swipe left / right', 'Switch lanes (mobile)'],
+        ['Swipe up / down',   'Jump / Slide (mobile)'],
+    ];
+    const rowStep = ctrlSz * 2.4;
+    const blockTop = H * 0.48;
+
+    rows.forEach(([keys, action], i) => {
+        const y = blockTop + i * rowStep;
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#ffdd55';
+        ctx.fillText(keys, W * 0.5 - 14, y);
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#cccccc';
+        ctx.fillText(action, W * 0.5 + 14, y);
+    });
+
+    // ── Stored high score (will be filled by M6 / localStorage) ─
+    const hsSz = clamp(Math.floor(H * 0.024), 11, 18);
+    ctx.font      = `${hsSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#777777';
+    ctx.textAlign = 'center';
+    ctx.fillText('Best: ---', W * 0.5, blockTop + rows.length * rowStep + rowStep * 0.8);
+
+    // ── Blinking "press to start" prompt ─────────────────────
+    const blink = Math.floor(performance.now() / 600) % 2 === 0;
+    if (blink) {
+        const promptSz = clamp(Math.floor(H * 0.035), 14, 28);
+        ctx.font      = `bold ${promptSz}px Arial, sans-serif`;
+        ctx.fillStyle = '#00ff99';
+        ctx.fillText('Press any key or tap to start', W * 0.5, H * 0.88);
+    }
+
+    ctx.restore();
+}
+
+// ── Game-Over overlay ─────────────────────────────────────────
+// Shows final run stats. Full high-score read/write added in M6.
+// Uses fillText only — no innerHTML / no string injection.
+function drawGameOverOverlay(W, H) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    // ── Title ─────────────────────────────────────────────────
+    const titleSz = clamp(Math.floor(H * 0.09), 28, 72);
+    ctx.font = `bold ${titleSz}px Arial, sans-serif`;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(180, 0, 0, 0.5)';
+    ctx.fillText('GAME OVER', W * 0.5 + 3, H * 0.30 + 3);
+    ctx.fillStyle = '#ff3333';
+    ctx.fillText('GAME OVER', W * 0.5, H * 0.30);
+
+    // ── Stats ─────────────────────────────────────────────────
+    const statSz = clamp(Math.floor(H * 0.038), 14, 30);
+    ctx.font      = `${statSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`Distance: ${Math.floor(GameState.distanceM)} m`, W * 0.5, H * 0.46);
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText(`Coins: ${GameState.coins}`, W * 0.5, H * 0.54);
+
+    // ── High score (placeholder until M6) ────────────────────
+    ctx.fillStyle = '#aaaaaa';
+    const hsSz = clamp(Math.floor(H * 0.028), 12, 22);
+    ctx.font = `${hsSz}px Arial, sans-serif`;
+    ctx.fillText('High Score: ---', W * 0.5, H * 0.63);
+
+    // ── Restart prompt ────────────────────────────────────────
+    const rstSz = clamp(Math.floor(H * 0.038), 14, 30);
+    ctx.font      = `bold ${rstSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#00ff99';
+    ctx.fillText('Press R / Enter or tap to Restart', W * 0.5, H * 0.77);
+
+    // ── Cross-device note (per technical design requirement) ──
+    const noteSz = clamp(Math.floor(H * 0.022), 10, 16);
+    ctx.font      = `${noteSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#555555';
+    ctx.fillText('Best score saved on this browser', W * 0.5, H * 0.90);
+
+    ctx.restore();
+}
+
+// ── Input handling ────────────────────────────────────────────
+// Only start/restart handled here for M1.
+// M2 adds in-game keyboard input; M5 adds full swipe recogniser.
+
+document.addEventListener('keydown', (e) => {
+    if (GameState.phase === 'start') {
+        startGame();
+    } else if (GameState.phase === 'dead') {
+        if (e.key === 'r' || e.key === 'R' || e.key === 'Enter') {
+            restartGame();
+        }
+    }
+    // In-game keys (lane switch, jump, slide) wired in M2.
+});
+
+// Tap: start or restart — attached to canvas to limit scope
+canvas.addEventListener('click', () => {
+    if (GameState.phase === 'start')   startGame();
+    else if (GameState.phase === 'dead') restartGame();
+});
+
+// Touch: same, passive (no scroll prevention needed here)
+canvas.addEventListener('touchend', () => {
+    if (GameState.phase === 'start')   startGame();
+    else if (GameState.phase === 'dead') restartGame();
+}, { passive: true });
+
+// ── Game-flow helpers ─────────────────────────────────────────
+function startGame() {
+    GameState.phase         = 'playing';
+    GameState.distanceM     = 0;
+    GameState.trackSpeed    = INITIAL_TRACK_SPEED;
+    GameState.score         = 0;
+    GameState.coins         = 0;
+    GameState.lives         = 3;
+    GameState.activeEffect  = null;
+    GameState.spawnCursor   = 0;
+    GameState.elapsedPlayMs = 0;
+
+    Player.lane            = 1;
+    Player.x               = getLaneCenterX(Player.lane);
+    Player.y               = groundY - Player.height;
+    Player.vy              = 0;
+    Player.state           = 'run';
+    Player.lives           = 3;
+    Player.invincible      = false;
+    Player.invincibleTimer = 0;
+    updatePlayerHitbox();
+
+    trackScrollX = 0;
+}
+
+function restartGame() {
+    // M6 will add full screen-flow (start → playing → dead → start).
+    // For now, a restart goes straight back into playing.
+    startGame();
+}
+
+// ── Game loop ─────────────────────────────────────────────────
+// requestAnimationFrame callback.
+// dt is clamped to MAX_DT (50ms) to prevent physics tunneling
+// when the user hides the tab and re-focuses it.
+let lastTimestamp = 0;
+
+function gameLoop(timestamp) {
+    const dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+    lastTimestamp = timestamp;
+
+    update(dt);
+    draw();
+
+    requestAnimationFrame(gameLoop);
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────
+window.addEventListener('resize', resize);
+
+resize();  // set initial pixel dimensions and draw first frame
+
+// Seed lastTimestamp then enter the loop so the first dt is ~0 rather than
+// the full time since page-load.
+requestAnimationFrame((ts) => {
+    lastTimestamp = ts;
+    requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
