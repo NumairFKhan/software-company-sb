@@ -1,0 +1,48 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`TokenUsageWidget — snapshot regression (expanded state with chevron) snapshot: header row contains both the title and the chevron toggle button 1`] = `
+<div
+  class="flex items-center justify-between mb-2"
+>
+  <h3
+    class="text-xs font-semibold text-surface-400 uppercase tracking-wide"
+  >
+    Token Usage
+     
+    <span
+      class="font-normal normal-case text-surface-600"
+    >
+      (per completed agent)
+    </span>
+  </h3>
+  <div
+    class="flex items-center gap-2"
+  >
+    <button
+      aria-expanded="true"
+      aria-label="Collapse token usage"
+      class="flex items-center justify-center rounded p-0.5 text-surface-400 hover:text-surface-200 hover:bg-surface-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-violet transition-colors"
+      data-testid="token-usage-toggle"
+      type="button"
+    >
+      <svg
+        aria-hidden="true"
+        class="lucide lucide-chevron-down rotate-180"
+        fill="none"
+        height="14"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        stroke-width="2"
+        viewBox="0 0 24 24"
+        width="14"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <path
+          d="m6 9 6 6 6-6"
+        />
+      </svg>
+    </button>
+  </div>
+</div>
+`;
