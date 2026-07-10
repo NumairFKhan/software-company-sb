@@ -16,8 +16,10 @@
  */
 
 import { useEffect, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 import { useActiveProject } from '@/contexts/ActiveProjectContext';
 import { getProjectTokenUsage, getConfig } from '@/lib/api';
+import { useLocalStorageState } from '@/hooks/useLocalStorageState';
 import type { TokenUsageEntry, AgentRole } from '@/types';
 
 /** "claude-sonnet-4-6" -> "sonnet-4-6" — compact enough for a table cell. */
@@ -117,6 +119,10 @@ export function TokenUsageWidget({ projectId }: TokenUsageWidgetProps) {
   const { state, dispatch } = useActiveProject();
   const [modelsByRole, setModelsByRole] = useState<Record<string, string>>({});
 
+  // MVP: single global key — per-project isolation (keyed by projectId) is
+  // deferred. TODO: key on projectId if bleed-across-projects is reported.
+  const [collapsed, setCollapsed] = useLocalStorageState('token-widget-collapsed', false);
+
   // ── Initial fetch ──────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -171,18 +177,30 @@ export function TokenUsageWidget({ projectId }: TokenUsageWidgetProps) {
       data-testid="token-usage-widget"
     >
       {/* ── Header ── */}
-      <div className="flex items-baseline justify-between mb-2">
+      <div className="flex items-center justify-between mb-2">
         <h3 className="text-xs font-semibold text-surface-400 uppercase tracking-wide">
           Token Usage{' '}
           <span className="font-normal normal-case text-surface-600">
             (per completed agent)
           </span>
         </h3>
-        {entries.length > 0 && (
-          <span className="text-sm font-bold text-gradient-brand">
-            {formatCost(totalCost)}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {entries.length > 0 && !collapsed && (
+            <span className="text-sm font-bold text-gradient-brand">
+              {formatCost(totalCost)}
+            </span>
+          )}
+          <button
+            type="button"
+            aria-label={collapsed ? 'Expand token usage' : 'Collapse token usage'}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed(!collapsed)}
+            className="flex items-center justify-center rounded p-0.5 text-surface-400 hover:text-surface-200 hover:bg-surface-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-violet transition-colors"
+            data-testid="token-usage-toggle"
+          >
+            <ChevronDown size={14} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       {entries.length === 0 ? (

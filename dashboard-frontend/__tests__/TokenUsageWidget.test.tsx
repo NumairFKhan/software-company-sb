@@ -8,6 +8,7 @@
  *   - Graceful API error handling (no crash, stays empty)
  *   - "per completed agent" accuracy label always visible
  *   - Live updates via context (SET_TOKEN_USAGE dispatch)
+ *   - Chevron toggle button renders and toggles collapsed state
  */
 
 // Mock fetch before any imports so the module uses the mock.
@@ -15,7 +16,7 @@ const mockFetch = jest.fn();
 (global as unknown as { fetch: typeof fetch }).fetch = mockFetch;
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { TokenUsageWidget } from '@/components/TokenUsageWidget';
 import { ActiveProjectProvider } from '@/contexts/ActiveProjectContext';
 import type { TokenUsageEntry } from '@/types';
@@ -55,6 +56,8 @@ function renderWidget(projectId = 'proj-1') {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  // Ensure localStorage is clean between tests so collapse state doesn't bleed.
+  localStorage.clear();
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -249,5 +252,123 @@ describe('TokenUsageWidget', () => {
 
     // Widget should still be mounted without errors.
     expect(screen.getByTestId('token-usage-widget')).toBeInTheDocument();
+  });
+});
+
+// ── Chevron toggle button tests ────────────────────────────────────────────────
+
+describe('TokenUsageWidget — chevron toggle button', () => {
+  it('renders the toggle button with data-testid="token-usage-toggle"', () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+    expect(screen.getByTestId('token-usage-toggle')).toBeInTheDocument();
+  });
+
+  it('button has aria-expanded="true" by default (widget starts expanded)', () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+    const btn = screen.getByTestId('token-usage-toggle');
+    // collapsed=false → aria-expanded=true
+    expect(btn).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('button has aria-label "Collapse token usage" when expanded', () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+    const btn = screen.getByTestId('token-usage-toggle');
+    expect(btn).toHaveAttribute('aria-label', 'Collapse token usage');
+  });
+
+  it('clicking the button toggles aria-expanded from true to false', async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    const btn = screen.getByTestId('token-usage-toggle');
+    expect(btn).toHaveAttribute('aria-expanded', 'true');
+
+    act(() => {
+      fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      expect(btn).toHaveAttribute('aria-expanded', 'false');
+    });
+  });
+
+  it('clicking the button twice returns to expanded state', async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    const btn = screen.getByTestId('token-usage-toggle');
+
+    act(() => { fireEvent.click(btn); });
+    await waitFor(() => {
+      expect(btn).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    act(() => { fireEvent.click(btn); });
+    await waitFor(() => {
+      expect(btn).toHaveAttribute('aria-expanded', 'true');
+    });
+  });
+
+  it('aria-label is "Expand token usage" after collapse', async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    const btn = screen.getByTestId('token-usage-toggle');
+
+    act(() => { fireEvent.click(btn); });
+
+    await waitFor(() => {
+      expect(btn).toHaveAttribute('aria-label', 'Expand token usage');
+    });
+  });
+
+  it('button is keyboard-accessible (role=button, not disabled)', () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    const btn = screen.getByTestId('token-usage-toggle');
+    // Must be a <button> element so it's natively keyboard-accessible.
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn).not.toBeDisabled();
+  });
+
+  it('widget content (table / empty state) is still visible after initial render (not pre-collapsed)', async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    // Empty state text should be visible — widget is expanded by default.
+    await waitFor(() => {
+      expect(screen.getByTestId('token-usage-empty')).toBeInTheDocument();
+    });
+  });
+
+  it('header title and toggle button coexist without displacing each other', () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    // Both the heading text and the button must be in the document.
+    expect(screen.getByText(/token usage/i)).toBeInTheDocument();
+    expect(screen.getByTestId('token-usage-toggle')).toBeInTheDocument();
   });
 });
