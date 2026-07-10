@@ -372,3 +372,149 @@ describe('TokenUsageWidget — chevron toggle button', () => {
     expect(screen.getByTestId('token-usage-toggle')).toBeInTheDocument();
   });
 });
+
+// ── Conditional body rendering tests ──────────────────────────────────────────
+
+describe('TokenUsageWidget — conditional body rendering', () => {
+  it('shows the empty-state element when expanded (default)', async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('token-usage-empty')).toBeInTheDocument();
+    });
+  });
+
+  it('hides the empty-state element (removes from DOM) after collapsing', async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    // Verify empty state is visible first.
+    await waitFor(() => {
+      expect(screen.getByTestId('token-usage-empty')).toBeInTheDocument();
+    });
+
+    // Collapse the widget.
+    act(() => {
+      fireEvent.click(screen.getByTestId('token-usage-toggle'));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('token-usage-empty')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows the table after collapsing then expanding', async () => {
+    // Use the correct backend wire format: a dict keyed by role.
+    // getProjectTokenUsage passes the raw response body to usageByRoleToEntries.
+    mockFetch
+      .mockResolvedValueOnce(
+        makeResponse({
+          developer: { total_cost_usd: 0.0123, calls: 5, usage: { input_tokens: 1000, output_tokens: 500 } },
+          architect: { total_cost_usd: 0.005, calls: 2, usage: { input_tokens: 1000, output_tokens: 500 } },
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ models_by_role: {} })); // getConfig
+    renderWidget();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('token-usage-row-developer')).toBeInTheDocument();
+    });
+
+    const btn = screen.getByTestId('token-usage-toggle');
+
+    // Collapse.
+    act(() => { fireEvent.click(btn); });
+    await waitFor(() => {
+      expect(screen.queryByTestId('token-usage-row-developer')).not.toBeInTheDocument();
+    });
+
+    // Expand again.
+    act(() => { fireEvent.click(btn); });
+    await waitFor(() => {
+      expect(screen.getByTestId('token-usage-row-developer')).toBeInTheDocument();
+    });
+  });
+
+  it('hides table rows from DOM when collapsed', async () => {
+    // Use the correct backend wire format: a dict keyed by role.
+    mockFetch
+      .mockResolvedValueOnce(
+        makeResponse({
+          developer: { total_cost_usd: 0.0123, calls: 5, usage: { input_tokens: 1000, output_tokens: 500 } },
+          architect: { total_cost_usd: 0.005, calls: 2, usage: { input_tokens: 1000, output_tokens: 500 } },
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ models_by_role: {} })); // getConfig
+    renderWidget();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('token-usage-row-developer')).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(screen.getByTestId('token-usage-toggle'));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('token-usage-row-developer')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('token-usage-row-architect')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('token-usage-total')).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps the header (title + button) visible when collapsed', async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    act(() => {
+      fireEvent.click(screen.getByTestId('token-usage-toggle'));
+    });
+
+    await waitFor(() => {
+      // Header title still present.
+      expect(screen.getByText(/token usage/i)).toBeInTheDocument();
+      // Toggle button still present.
+      expect(screen.getByTestId('token-usage-toggle')).toBeInTheDocument();
+    });
+  });
+
+  it('starts collapsed after mount when localStorage contains "true"', async () => {
+    // Pre-seed localStorage before rendering — hook reads it after mount.
+    localStorage.setItem('token-widget-collapsed', 'true');
+
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    // After hydration the hook reads localStorage; body should be gone.
+    await waitFor(() => {
+      expect(screen.queryByTestId('token-usage-empty')).not.toBeInTheDocument();
+    });
+
+    // But the header must still be present.
+    expect(screen.getByTestId('token-usage-toggle')).toBeInTheDocument();
+  });
+
+  it('starts expanded by default when no localStorage entry exists', async () => {
+    // localStorage is cleared in beforeEach — no entry for the key.
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ project_id: 'proj-1', entries: [] }),
+    );
+    renderWidget();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('token-usage-empty')).toBeInTheDocument();
+    });
+
+    // aria-expanded should be "true".
+    expect(screen.getByTestId('token-usage-toggle')).toHaveAttribute('aria-expanded', 'true');
+  });
+});

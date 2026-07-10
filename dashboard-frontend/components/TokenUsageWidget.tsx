@@ -203,56 +203,60 @@ export function TokenUsageWidget({ projectId }: TokenUsageWidgetProps) {
         </div>
       </div>
 
-      {entries.length === 0 ? (
-        <p className="text-xs text-surface-500 py-1" data-testid="token-usage-empty">
-          No token data yet.
-        </p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table
-            className="w-full text-xs"
-            aria-label="Token usage per agent"
-          >
-            <thead>
-              <tr className="text-surface-500 border-b border-surface-800">
-                <th className="pb-1 pr-3 text-left font-medium">Agent</th>
-                <th className="pb-1 pr-3 text-left font-medium">Model</th>
-                <th className="pb-1 pr-3 text-right font-medium">Calls</th>
-                <th className="pb-1 pr-3 text-right font-medium">Tokens</th>
-                <th className="pb-1 text-right font-medium">Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((entry) => (
-                <TokenUsageRow
-                  key={entry.agent_role}
-                  entry={entry}
-                  maxCost={maxCost}
-                  model={modelsByRole[entry.agent_role]}
-                />
-              ))}
-            </tbody>
-            {/* Totals footer — only shown when there's something to sum */}
-            <tfoot>
-              <tr
-                className="border-t border-surface-700 font-semibold text-surface-50"
-                data-testid="token-usage-total"
-              >
-                <td className="pt-1.5 pr-3 text-surface-200">Total</td>
-                <td className="pt-1.5 pr-3" />
-                <td className="pt-1.5 pr-3 text-right tabular-nums text-surface-300">
-                  {formatNumber(totalCalls)}
-                </td>
-                <td className="pt-1.5 pr-3 text-right tabular-nums text-surface-300">
-                  {formatNumber(totalTokens)}
-                </td>
-                <td className="pt-1.5 text-right tabular-nums">
-                  {formatCost(totalCost)}
-                </td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+      {/* Body is fully unmounted when collapsed — not hidden with CSS — so
+          panels below shift up and vertical space is fully reclaimed. */}
+      {!collapsed && (
+        entries.length === 0 ? (
+          <p className="text-xs text-surface-500 py-1" data-testid="token-usage-empty">
+            No token data yet.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table
+              className="w-full text-xs"
+              aria-label="Token usage per agent"
+            >
+              <thead>
+                <tr className="text-surface-500 border-b border-surface-800">
+                  <th className="pb-1 pr-3 text-left font-medium">Agent</th>
+                  <th className="pb-1 pr-3 text-left font-medium">Model</th>
+                  <th className="pb-1 pr-3 text-right font-medium">Calls</th>
+                  <th className="pb-1 pr-3 text-right font-medium">Tokens</th>
+                  <th className="pb-1 text-right font-medium">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((entry) => (
+                  <TokenUsageRow
+                    key={entry.agent_role}
+                    entry={entry}
+                    maxCost={maxCost}
+                    model={modelsByRole[entry.agent_role]}
+                  />
+                ))}
+              </tbody>
+              {/* Totals footer — only shown when there's something to sum */}
+              <tfoot>
+                <tr
+                  className="border-t border-surface-700 font-semibold text-surface-50"
+                  data-testid="token-usage-total"
+                >
+                  <td className="pt-1.5 pr-3 text-surface-200">Total</td>
+                  <td className="pt-1.5 pr-3" />
+                  <td className="pt-1.5 pr-3 text-right tabular-nums text-surface-300">
+                    {formatNumber(totalCalls)}
+                  </td>
+                  <td className="pt-1.5 pr-3 text-right tabular-nums text-surface-300">
+                    {formatNumber(totalTokens)}
+                  </td>
+                  <td className="pt-1.5 text-right tabular-nums">
+                    {formatCost(totalCost)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )
       )}
     </div>
   );
