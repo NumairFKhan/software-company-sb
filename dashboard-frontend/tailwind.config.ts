@@ -50,6 +50,16 @@ const config: Config = {
     "./contexts/**/*.{js,ts,jsx,tsx,mdx}",
     "./app/**/*.{js,ts,jsx,tsx,mdx}",
   ],
+  // Safelist classes that are constructed dynamically and may not be detected
+  // by the JIT scanner during a production build.
+  safelist: [
+    // Used in TokenUsageWidget chevron rotation lookup:
+    //   const chevronClass = { true: 'rotate-0', false: 'rotate-180' }
+    // rotate-0 is already a Tailwind base utility; rotate-180 is safelisted
+    // here as a belt-and-suspenders guarantee it survives purging even if the
+    // scanner misses the string-literal object.
+    'rotate-180',
+  ],
   theme: {
     extend: {
       colors: {

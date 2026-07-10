@@ -109,6 +109,19 @@ function TokenUsageRow({
   );
 }
 
+// ── Chevron rotation lookup ────────────────────────────────────────────────────
+// Static object so the JIT scanner sees both class strings as literals —
+// an alternative to (or belt-and-suspenders alongside) safelisting rotate-180
+// in tailwind.config.ts.
+//
+// Convention: chevron points UP (rotate-180) when expanded to signal "click to
+// collapse", and points DOWN (rotate-0, default) when collapsed to signal
+// "click to expand".
+const CHEVRON_CLASS: Record<string, string> = {
+  true:  'rotate-0',    // collapsed → pointing down  → "click to expand"
+  false: 'rotate-180',  // expanded  → pointing up    → "click to collapse"
+};
+
 // ── TokenUsageWidget ───────────────────────────────────────────────────────────
 
 export interface TokenUsageWidgetProps {
@@ -198,7 +211,11 @@ export function TokenUsageWidget({ projectId }: TokenUsageWidgetProps) {
             className="flex items-center justify-center rounded p-0.5 text-surface-400 hover:text-surface-200 hover:bg-surface-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-violet transition-colors"
             data-testid="token-usage-toggle"
           >
-            <ChevronDown size={14} aria-hidden="true" />
+            <ChevronDown
+              size={14}
+              aria-hidden="true"
+              className={CHEVRON_CLASS[String(collapsed)]}
+            />
           </button>
         </div>
       </div>
