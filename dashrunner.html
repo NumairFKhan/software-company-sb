@@ -64,6 +64,28 @@ const GRAVITY          = 2800;  // px/s² downward acceleration
 const JUMP_VY          = -820;  // px/s initial upward velocity (negative = up)
 const LANE_COOLDOWN_MS = 100;   // ms between allowed lane-switch inputs
 
+// ── M3: Obstacle & collision constants ────────────────────────
+const INVINCIBILITY_MS   = 2000;  // ms of invincibility after a hit
+const HITBOX_SHRINK      = 0.12;  // 12% shrink on each axis edge → generous feel
+const OBS_W              = 50;    // obstacle sprite width (px)
+
+// Obstacle heights / vertical offsets (relative to groundY, upward)
+// barrier: tall ground block — player must JUMP over
+const OBS_BARRIER_H      = PLAYER_H + 10;  // 70px; taller than the player
+// overhead: ceiling-hung beam — player must SLIDE under (running player hits it)
+const OBS_OVERHEAD_H     = Math.floor(PLAYER_H * 0.5 - 10);  // 20px
+// OBS_OVERHEAD_TOP = gap (px) between groundY and the BOTTOM edge of the overhead beam.
+// Must satisfy: PLAYER_H*0.5 < OBS_OVERHEAD_TOP < PLAYER_H so that
+//   running player top (groundY-PLAYER_H) is BELOW beam bottom (groundY-OBS_OVERHEAD_TOP) → HIT
+//   sliding player top (groundY-PLAYER_H*0.5) is ABOVE beam bottom                        → CLEAR
+const OBS_OVERHEAD_TOP   = Math.floor(PLAYER_H * 0.5) + 5;  // 35; satisfies 30 < 35 < 60
+// low: ceiling-hung beam positioned lower than overhead — also requires slide
+const OBS_LOW_H          = 18;
+const OBS_LOW_TOP        = Math.floor(PLAYER_H * 0.5) + 16;  // distance above groundY
+
+// Initial clear gap (in world-scroll px) before first obstacle spawns
+const INITIAL_SPAWN_GAP  = 300;   // ≈1s at default speed; obstacle then travels ~2.7s to reach player
+
 // ── GameState ─────────────────────────────────────────────────
 // Single source of truth for every subsequent ticket to read/write.
 // 'phase' drives which screen is rendered each frame.
@@ -106,6 +128,64 @@ let laneW     = 0;   // width of one lane in px
 
 // Scrolling state
 let trackScrollX = 0;  // cumulative scroll distance in px; wraps every frame modulo
+
+// ── M3: Obstacle patterns ─────────────────────────────────────
+// 7 templates ordered simple → complex. Spawn manager picks them in order
+// and only unlocks multi-lane patterns after the player has survived long enough.
+// Slot fields: lane (0-2), type ('barrier'|'overhead'|'low'), relativeX (px offset).
+// safeGapAfter: minimum world-scroll distance (px) before next pattern can spawn.
+const OBSTACLE_PATTERNS = [
+    // ── P0: Single centre barrier — jump over ──────────────────
+    {
+        id: 0, slots: [{ lane: 1, type: 'barrier', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 480,
+    },
+    // ── P1: Left barrier — jump over ──────────────────────────
+    {
+        id: 1, slots: [{ lane: 0, type: 'barrier', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 440,
+    },
+    // ── P2: Right barrier — jump over ─────────────────────────
+    {
+        id: 2, slots: [{ lane: 2, type: 'barrier', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 440,
+    },
+    // ── P3: Centre overhead beam — slide under ─────────────────
+    {
+        id: 3, slots: [{ lane: 1, type: 'overhead', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 420,
+    },
+    // ── P4: Right low beam — slide under (tighter clearance) ───
+    {
+        id: 4, slots: [{ lane: 2, type: 'low', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 400,
+    },
+    // ── P5: Barriers in lanes 0 & 2 — must be in lane 1 ───────
+    //         (only unlocked after 15s play)
+    {
+        id: 5,
+        slots: [
+            { lane: 0, type: 'barrier', relativeX: 0 },
+            { lane: 2, type: 'barrier', relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 550,
+    },
+    // ── P6: Barrier lane 0 + overhead lane 1 — dodge combo ────
+    //         (only unlocked after 20s play)
+    {
+        id: 6,
+        slots: [
+            { lane: 0, type: 'barrier',  relativeX: 0 },
+            { lane: 1, type: 'overhead', relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 520,
+    },
+];
+
+// ── M3: Obstacle runtime state ────────────────────────────────
+let obstacles      = [];   // active Obstacle objects
+let nextObstacleId = 0;    // monotonic id counter
+let patternIndex   = 0;    // which OBSTACLE_PATTERNS index to spawn next
 
 // ── M2: Player movement state ─────────────────────────────────
 let laneCooldown = 0;   // ms remaining; prevents rapid double-tap lane switches
@@ -237,6 +317,218 @@ function updatePlayer(dt) {
     updatePlayerHitbox();
 }
 
+// ── M3: Obstacle visual geometry ─────────────────────────────
+// Returns { yTop, h, color, outline } for each obstacle type.
+// yTop is the absolute canvas-Y of the obstacle's top edge (computed
+// each frame from groundY so it scales with canvas height on resize).
+function getObstacleGeometry(type) {
+    switch (type) {
+        case 'barrier':
+            // Tall block sitting on the ground; player must jump over it.
+            return {
+                yTop:    groundY - OBS_BARRIER_H,
+                h:       OBS_BARRIER_H,
+                color:   '#cc2222',
+                outline: '#ff5555',
+            };
+        case 'overhead':
+            // Ceiling-hung beam. Bottom edge is above the slide player's top,
+            // so running player hits it but sliding player clears it.
+            // Running player top  = groundY - PLAYER_H      (hits)
+            // Sliding player top  = groundY - PLAYER_H*0.5  (clears)
+            return {
+                yTop:    groundY - OBS_OVERHEAD_TOP - OBS_OVERHEAD_H,
+                h:       OBS_OVERHEAD_H,
+                color:   '#7722cc',
+                outline: '#bb66ff',
+            };
+        case 'low':
+            // Lower-hanging beam; same slide-to-clear logic, tighter margin.
+            return {
+                yTop:    groundY - OBS_LOW_TOP - OBS_LOW_H,
+                h:       OBS_LOW_H,
+                color:   '#cc6600',
+                outline: '#ffaa33',
+            };
+        default:
+            return { yTop: groundY - OBS_BARRIER_H, h: OBS_BARRIER_H, color: '#cc2222', outline: '#ff4444' };
+    }
+}
+
+// ── M3: Obstacle hitbox (AABB with HITBOX_SHRINK inset) ───────
+// Shrinking 12% on each side makes collisions feel generous/fair.
+// Called each frame after obs.screenX is updated.
+function updateObstacleHitbox(obs) {
+    const geo   = getObstacleGeometry(obs.type);
+    const insetX = OBS_W         * HITBOX_SHRINK;
+    const insetY = geo.h         * HITBOX_SHRINK;
+    obs.hitbox.x = obs.screenX   + insetX;
+    obs.hitbox.y = geo.yTop      + insetY;
+    obs.hitbox.w = OBS_W         - insetX * 2;
+    obs.hitbox.h = geo.h         - insetY * 2;
+    // Cache geo for drawObstacles (avoid double calculation)
+    obs._geo = geo;
+}
+
+// ── M3: AABB overlap test ─────────────────────────────────────
+function aabbOverlap(a, b) {
+    return a.x < b.x + b.w &&
+           a.x + a.w > b.x &&
+           a.y < b.y + b.h &&
+           a.y + a.h > b.y;
+}
+
+// ── M3: Pattern selection ─────────────────────────────────────
+// First 5 patterns (P0-P4) are simple single-lane obstacles. Complex
+// multi-lane patterns (P5, P6) unlock after 20s of play time to ensure
+// the first 60s never produces an impossible combination.
+function pickPattern() {
+    const COMPLEX_UNLOCK_MS = 20000;  // 20 seconds before complex patterns appear
+    const simpleCount       = 5;      // P0–P4 are single-lane / always safe
+    const totalCount        = OBSTACLE_PATTERNS.length;
+
+    let maxId;
+    if (GameState.elapsedPlayMs < COMPLEX_UNLOCK_MS) {
+        maxId = simpleCount;   // only P0–P4
+    } else {
+        maxId = totalCount;    // all patterns
+    }
+
+    const p = OBSTACLE_PATTERNS[patternIndex % maxId];
+    patternIndex++;
+    return p;
+}
+
+// ── M3: Spawn a pattern ───────────────────────────────────────
+// Each obstacle in the pattern starts just off the right edge of the canvas.
+// relativeX allows multi-obstacle patterns to have different X offsets.
+function spawnPattern(pattern) {
+    const baseX = canvas.width + OBS_W + 20;  // just beyond right edge
+    pattern.slots.forEach(slot => {
+        const obs = {
+            id:        nextObstacleId++,
+            lane:      slot.lane,
+            screenX:   baseX + slot.relativeX,
+            type:      slot.type,
+            patternId: pattern.id,
+            hitbox:    { x: 0, y: 0, w: 0, h: 0 },
+            _geo:      null,
+        };
+        updateObstacleHitbox(obs);
+        obstacles.push(obs);
+    });
+    // Advance spawn cursor; trigger fires again after safeGapAfter more px scroll
+    GameState.spawnCursor += pattern.safeGapAfter;
+}
+
+// ── M3: Try to spawn the next pattern ────────────────────────
+// spawnCursor tracks the accumulated trackScrollX value at which to trigger
+// the next spawn. Advances by safeGapAfter after each successful spawn.
+function trySpawnPatterns() {
+    while (GameState.phase === 'playing' &&
+           trackScrollX >= GameState.spawnCursor) {
+        spawnPattern(pickPattern());
+    }
+}
+
+// ── M3: Collision detection ────────────────────────────────────
+function checkCollisions() {
+    if (Player.invincible) return;
+    for (const obs of obstacles) {
+        if (aabbOverlap(Player.hitbox, obs.hitbox)) {
+            handleHit();
+            return;  // one hit per frame maximum
+        }
+    }
+}
+
+// ── M3: Handle a hit event ────────────────────────────────────
+function handleHit() {
+    GameState.lives--;
+    Player.lives = GameState.lives;
+
+    if (GameState.lives <= 0) {
+        GameState.lives  = 0;
+        Player.lives     = 0;
+        GameState.phase  = 'dead';
+        Player.invincible = false;
+        return;
+    }
+
+    // Grant invincibility window
+    Player.invincible      = true;
+    Player.invincibleTimer = INVINCIBILITY_MS;
+}
+
+// ── M3: Update obstacle positions, spawn, collide, invincibility ─
+function updateObstacles(dt) {
+    const scrollDelta = GameState.trackSpeed * dt;
+
+    // Move obstacles left and refresh hitboxes
+    for (const obs of obstacles) {
+        obs.screenX -= scrollDelta;
+        updateObstacleHitbox(obs);
+    }
+
+    // Cull obstacles that have fully scrolled off the left edge
+    if (obstacles.length > 0 && obstacles[0].screenX + OBS_W < -60) {
+        obstacles.shift();
+    }
+
+    // Spawn the next pattern when the scroll cursor is reached
+    trySpawnPatterns();
+
+    // AABB collision (skip while invincible)
+    checkCollisions();
+
+    // Tick down invincibility timer
+    if (Player.invincible) {
+        Player.invincibleTimer -= dt * 1000;
+        if (Player.invincibleTimer <= 0) {
+            Player.invincible      = false;
+            Player.invincibleTimer = 0;
+        }
+    }
+}
+
+// ── M3: Draw obstacles ────────────────────────────────────────
+function drawObstacles() {
+    for (const obs of obstacles) {
+        const geo  = obs._geo || getObstacleGeometry(obs.type);
+        const x    = obs.screenX;
+        const y    = geo.yTop;
+        const w    = OBS_W;
+        const h    = geo.h;
+
+        // Skip if completely off-screen
+        if (x + w < 0 || x > canvas.width) continue;
+
+        ctx.save();
+
+        // Body fill
+        ctx.fillStyle = geo.color;
+        ctx.fillRect(x, y, w, h);
+
+        // Outline
+        ctx.strokeStyle = geo.outline;
+        ctx.lineWidth   = 2;
+        ctx.strokeRect(x, y, w, h);
+
+        // Type indicator: a lighter stripe across the middle
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        if (obs.type === 'barrier') {
+            // Diagonal cross-hatching on barrier
+            ctx.fillRect(x + 4, y + 4, w - 8, h * 0.3);
+            ctx.fillRect(x + 4, y + h * 0.65, w - 8, h * 0.3);
+        } else {
+            // Simple centre bar for overhead/low beams
+            ctx.fillRect(x + 4, y + h * 0.3, w - 8, h * 0.4);
+        }
+
+        ctx.restore();
+    }
+}
+
 // ── Resize ────────────────────────────────────────────────────
 // Called on load and every window resize.
 // Sets canvas pixel dimensions, recomputes layout, redraws immediately
@@ -277,7 +569,8 @@ function update(dt) {
     // M2: player movement, jump arc, lane-switch cooldown
     updatePlayer(dt);
 
-    // Tickets M3–M7 will update obstacles, coins, difficulty here.
+    // M3: obstacle spawning, scrolling, collision detection, invincibility
+    updateObstacles(dt);
 }
 
 // ── Draw ─────────────────────────────────────────────────────
@@ -293,7 +586,9 @@ function draw() {
     // overlay screens are drawn on top.
     drawSky(W, H);
     drawTrack(W, H);
+    drawObstacles();   // M3: draw before player so player renders on top
     drawPlayer();
+    drawHUD(W, H);     // M3: minimal HUD showing lives (M4 will expand this)
 
     if (GameState.phase === 'start') {
         drawStartOverlay(W, H);
@@ -453,6 +748,32 @@ function drawPlayer() {
     } else {
         // Run & jump: standard upper-face bar
         ctx.fillRect(px + pw * 0.15, py + ph * 0.08, pw * 0.70, ph * 0.18);
+    }
+
+    ctx.restore();
+}
+
+// ── M3: Minimal HUD (lives pips + distance) ───────────────────
+// M4 will add coin count and power-up display; this stub keeps it visible during M3 testing.
+function drawHUD(W, H) {
+    if (GameState.phase !== 'playing') return;
+
+    ctx.save();
+    ctx.textBaseline = 'top';
+
+    // ── Distance label (top-right) ───────────────────────────
+    const hSz = clamp(Math.floor(H * 0.030), 12, 22);
+    ctx.font      = `bold ${hSz}px 'Courier New', monospace`;
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${Math.floor(GameState.distanceM)} m`, W - 14, 12);
+
+    // ── Life pips (top-left, three coloured squares) ──────────
+    const pipSize = clamp(Math.floor(H * 0.028), 10, 20);
+    const pipGap  = pipSize + 4;
+    for (let i = 0; i < 3; i++) {
+        ctx.fillStyle = i < GameState.lives ? '#ff4444' : '#333333';
+        ctx.fillRect(12 + i * pipGap, 12, pipSize, pipSize);
     }
 
     ctx.restore();
@@ -677,6 +998,14 @@ function startGame() {
     // M2: reset movement state
     laneCooldown = 0;
     slideHeld    = false;
+
+    // M3: reset obstacle state
+    obstacles           = [];
+    nextObstacleId      = 0;
+    patternIndex        = 0;
+    // First pattern spawns after INITIAL_SPAWN_GAP px of scroll.
+    // At 300px/s that's ~1s, then obstacle takes ~canvas.width/300 ≈ 2.7s to arrive.
+    GameState.spawnCursor = INITIAL_SPAWN_GAP;
 
     trackScrollX = 0;
 }
