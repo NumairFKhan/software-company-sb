@@ -1,0 +1,20 @@
+{
+  "extends": ["next/core-web-vitals"],
+  "rules": {
+    "no-restricted-globals": [
+      "warn",
+      {
+        "name": "WebSocket",
+        "message": "WebSocket usage must live in a 'use client' component/hook. Use useWebSocket from @/hooks/useWebSocket instead of the WebSocket global directly."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["hooks/useWebSocket.ts", "app/dev-ws/**/*.tsx"],
+      "rules": {
+        "no-restricted-globals": "off"
+      }
+    }
+  ]
+}

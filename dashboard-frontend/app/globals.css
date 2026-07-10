@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark-first by design, not by OS preference — this is the dashboard's own
+   brand, not a light-mode app with a dark fallback. */
+:root {
+  --background: #0b0b14;
+  --foreground: #e7e7ee;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Signature brand-gradient text, used sparingly for headings/branding. */
+  .text-gradient-brand {
+    background-image: linear-gradient(135deg, #8b5cf6 0%, #d946ef 50%, #22d3ee 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .bg-gradient-shimmer {
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.06) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+  }
+}
+
+/* Slim, dark, low-contrast scrollbars — a default OS scrollbar looks out of
+   place against a near-black UI with vivid accents. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: #2c2c3c;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #3f3f52;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2c2c3c transparent;
+}
