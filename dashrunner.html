@@ -573,6 +573,10 @@ function handleHit() {
         Player.lives     = 0;
         GameState.phase  = 'dead';
         Player.invincible = false;
+        // M6: persist high score before rendering the game-over overlay.
+        // saveHighScore() also sets newBestAchieved so drawGameOverOverlay
+        // can show the "New Best!" badge on the very first dead frame.
+        saveHighScore();
         return;
     }
 
@@ -722,6 +726,67 @@ function trySpawnPowerUp() {
     if (GameState.distanceM >= nextPowerUpDistM) {
         spawnPowerUp();
         nextPowerUpDistM = GameState.distanceM + POWERUP_SPAWN_DIST;
+    }
+}
+
+// ── M6: High score persistence via localStorage ───────────────
+// Schema: dashrunner_hs → JSON { bestDistance: number, bestCoins: number }
+// Security: localStorage data is ONLY read via JSON.parse and written via
+// JSON.stringify — never injected into innerHTML or the DOM.
+// All canvas text uses fillText only.
+
+let highScore = { bestDistance: 0, bestCoins: 0 };
+let newBestAchieved = false;  // true after a run that beat the stored record
+
+// loadHighScore — reads dashrunner_hs from localStorage.
+// Wrapped in try/catch: private browsing mode on some browsers blocks
+// localStorage entirely and throws; malformed JSON is also caught safely.
+function loadHighScore() {
+    try {
+        const raw = localStorage.getItem('dashrunner_hs');
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (typeof parsed.bestDistance === 'number' && isFinite(parsed.bestDistance)) {
+                highScore.bestDistance = parsed.bestDistance;
+            }
+            if (typeof parsed.bestCoins === 'number' && isFinite(parsed.bestCoins)) {
+                highScore.bestCoins = parsed.bestCoins;
+            }
+        }
+    } catch (_e) {
+        // localStorage blocked or JSON malformed — safe to silently ignore.
+        // highScore stays at its default { bestDistance: 0, bestCoins: 0 }.
+    }
+}
+
+// saveHighScore — compares the just-finished run against the stored record.
+// Writes to localStorage only when at least one metric improves.
+// Sets newBestAchieved = true so the game-over overlay can show "New Best!".
+function saveHighScore() {
+    const dist  = Math.floor(GameState.distanceM);
+    const coins = GameState.coins;
+    let updated = false;
+
+    if (dist > highScore.bestDistance) {
+        highScore.bestDistance = dist;
+        updated = true;
+    }
+    if (coins > highScore.bestCoins) {
+        highScore.bestCoins = coins;
+        updated = true;
+    }
+
+    newBestAchieved = updated;
+
+    if (updated) {
+        try {
+            localStorage.setItem(
+                'dashrunner_hs',
+                JSON.stringify({ bestDistance: highScore.bestDistance, bestCoins: highScore.bestCoins })
+            );
+        } catch (_e) {
+            // localStorage blocked or storage quota exceeded — safe to ignore.
+        }
     }
 }
 
@@ -1165,12 +1230,17 @@ function drawStartOverlay(W, H) {
         ctx.fillText(action, W * 0.5 + 14, y);
     });
 
-    // ── Stored high score (will be filled by M6 / localStorage) ─
+    // ── M6: Stored high score from localStorage ───────────────
     const hsSz = clamp(Math.floor(H * 0.024), 11, 18);
     ctx.font      = `${hsSz}px Arial, sans-serif`;
-    ctx.fillStyle = '#777777';
+    ctx.fillStyle = highScore.bestDistance > 0 ? '#aaaaff' : '#777777';
     ctx.textAlign = 'center';
-    ctx.fillText('Best: ---', W * 0.5, blockTop + rows.length * rowStep + rowStep * 0.8);
+    // Safety: highScore values are numbers (validated in loadHighScore) —
+    // using fillText (never innerHTML) so XSS is not possible even on shared hosts.
+    const hsLabel = highScore.bestDistance > 0
+        ? `Best: ${highScore.bestDistance} m  ●  ${highScore.bestCoins} coins`
+        : 'Best: ---';
+    ctx.fillText(hsLabel, W * 0.5, blockTop + rows.length * rowStep + rowStep * 0.8);
 
     // ── Blinking "press to start" prompt ─────────────────────
     const blink = Math.floor(performance.now() / 600) % 2 === 0;
@@ -1185,8 +1255,9 @@ function drawStartOverlay(W, H) {
 }
 
 // ── Game-Over overlay ─────────────────────────────────────────
-// Shows final run stats. Full high-score read/write added in M6.
-// Uses fillText only — no innerHTML / no string injection.
+// Shows final run stats, high score, optional "New Best!" badge,
+// a styled Restart button, and the cross-device disclaimer.
+// All text rendered via fillText — never innerHTML — to prevent stored-XSS.
 function drawGameOverOverlay(W, H) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
     ctx.fillRect(0, 0, W, H);
@@ -1199,37 +1270,77 @@ function drawGameOverOverlay(W, H) {
     const titleSz = clamp(Math.floor(H * 0.09), 28, 72);
     ctx.font = `bold ${titleSz}px Arial, sans-serif`;
 
-    // Shadow
+    // Drop shadow
     ctx.fillStyle = 'rgba(180, 0, 0, 0.5)';
-    ctx.fillText('GAME OVER', W * 0.5 + 3, H * 0.30 + 3);
+    ctx.fillText('GAME OVER', W * 0.5 + 3, H * 0.22 + 3);
     ctx.fillStyle = '#ff3333';
-    ctx.fillText('GAME OVER', W * 0.5, H * 0.30);
+    ctx.fillText('GAME OVER', W * 0.5, H * 0.22);
 
-    // ── Stats ─────────────────────────────────────────────────
+    // ── Run stats ─────────────────────────────────────────────
     const statSz = clamp(Math.floor(H * 0.038), 14, 30);
     ctx.font      = `${statSz}px Arial, sans-serif`;
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(`Distance: ${Math.floor(GameState.distanceM)} m`, W * 0.5, H * 0.46);
-    ctx.fillStyle = '#ffcc00';
-    ctx.fillText(`Coins: ${GameState.coins}`, W * 0.5, H * 0.54);
+    // Safety: GameState values are numbers — fillText, not innerHTML.
+    ctx.fillText(`Distance:  ${Math.floor(GameState.distanceM)} m`, W * 0.5, H * 0.36);
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText(`Coins:  ${GameState.coins}`, W * 0.5, H * 0.43);
 
-    // ── High score (placeholder until M6) ────────────────────
-    ctx.fillStyle = '#aaaaaa';
-    const hsSz = clamp(Math.floor(H * 0.028), 12, 22);
-    ctx.font = `${hsSz}px Arial, sans-serif`;
-    ctx.fillText('High Score: ---', W * 0.5, H * 0.63);
+    // ── M6: High score from localStorage ─────────────────────
+    const hsSz = clamp(Math.floor(H * 0.030), 12, 24);
+    ctx.font      = `bold ${hsSz}px Arial, sans-serif`;
+    const hsDistText  = highScore.bestDistance > 0
+        ? `${highScore.bestDistance} m`
+        : '---';
+    ctx.fillStyle = '#aaaaff';
+    ctx.fillText(`Best:  ${hsDistText}  ●  ${highScore.bestCoins} coins`, W * 0.5, H * 0.52);
 
-    // ── Restart prompt ────────────────────────────────────────
-    const rstSz = clamp(Math.floor(H * 0.038), 14, 30);
-    ctx.font      = `bold ${rstSz}px Arial, sans-serif`;
-    ctx.fillStyle = '#00ff99';
-    ctx.fillText('Press R / Enter or tap to Restart', W * 0.5, H * 0.77);
+    // ── "New Best!" badge — shown when this run set a new record ──
+    if (newBestAchieved) {
+        const nbSz = clamp(Math.floor(H * 0.040), 15, 32);
+        ctx.font      = `bold ${nbSz}px Arial, sans-serif`;
+        ctx.fillStyle = '#ffdd00';
+        // Slight shadow for legibility
+        ctx.fillStyle = 'rgba(120, 80, 0, 0.6)';
+        ctx.fillText('★  New Best!  ★', W * 0.5 + 2, H * 0.60 + 2);
+        ctx.fillStyle = '#ffdd00';
+        ctx.fillText('★  New Best!  ★', W * 0.5, H * 0.60);
+    }
 
-    // ── Cross-device note (per technical design requirement) ──
+    // ── Restart button (styled rectangle) ────────────────────
+    // Draw a filled pill-like rectangle so it reads as a tappable button
+    // on both desktop and mobile.
+    const rstSz = clamp(Math.floor(H * 0.038), 14, 28);
+    ctx.font = `bold ${rstSz}px Arial, sans-serif`;
+    const rstLabel   = 'RESTART';
+    const rstMetrics = ctx.measureText(rstLabel);
+    const rstBtnW    = rstMetrics.width + clamp(Math.floor(W * 0.08), 40, 80);
+    const rstBtnH    = rstSz + clamp(Math.floor(H * 0.03), 16, 28);
+    const rstBtnX    = W * 0.5 - rstBtnW * 0.5;
+    const rstBtnY    = H * 0.70 - rstBtnH * 0.5;
+
+    // Button fill
+    ctx.fillStyle = '#00cc77';
+    ctx.fillRect(rstBtnX, rstBtnY, rstBtnW, rstBtnH);
+    // Button border
+    ctx.strokeStyle = '#00ffaa';
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(rstBtnX, rstBtnY, rstBtnW, rstBtnH);
+    // Button label
+    ctx.fillStyle    = '#001a0f';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rstLabel, W * 0.5, H * 0.70);
+
+    // Small sub-label: keyboard shortcut hint
+    const hintSz = clamp(Math.floor(H * 0.020), 9, 14);
+    ctx.font      = `${hintSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#55aa88';
+    ctx.fillText('R  ·  Enter  ·  tap', W * 0.5, H * 0.70 + rstBtnH * 0.5 + hintSz);
+
+    // ── Cross-device note (technical design requirement) ──────
     const noteSz = clamp(Math.floor(H * 0.022), 10, 16);
     ctx.font      = `${noteSz}px Arial, sans-serif`;
     ctx.fillStyle = '#555555';
-    ctx.fillText('Best score saved on this browser', W * 0.5, H * 0.90);
+    ctx.fillText('Best score saved on this browser', W * 0.5, H * 0.92);
 
     ctx.restore();
 }
@@ -1452,9 +1563,45 @@ function startGame() {
 }
 
 function restartGame() {
-    // M6 will add full screen-flow (start → playing → dead → start).
-    // For now, a restart goes straight back into playing.
-    startGame();
+    // M6: full game-loop flow — dead → start screen (not straight back to playing).
+    // Player sees the updated high score on the start screen before the next run.
+    // Reset all entity arrays and game state, then set phase='start'.
+    obstacles           = [];
+    coins               = [];
+    powerUps            = [];
+    nextObstacleId      = 0;
+    nextCoinId          = 0;
+    nextPowerUpId       = 0;
+    patternIndex        = 0;
+    trackScrollX        = 0;
+    laneCooldown        = 0;
+    slideHeld           = false;
+    nextPowerUpDistM    = POWERUP_SPAWN_DIST;
+
+    // Reset player position and state
+    Player.lane            = 1;
+    Player.x               = getLaneCenterX(Player.lane);
+    Player.y               = groundY - Player.height;
+    Player.vy              = 0;
+    Player.state           = 'run';
+    Player.lives           = 3;
+    Player.invincible      = false;
+    Player.invincibleTimer = 0;
+    updatePlayerHitbox();
+
+    // Reset GameState fields (phase → 'start' to complete the loop)
+    GameState.phase         = 'start';
+    GameState.distanceM     = 0;
+    GameState.trackSpeed    = INITIAL_TRACK_SPEED;
+    GameState.score         = 0;
+    GameState.coins         = 0;
+    GameState.lives         = 3;
+    GameState.activeEffect  = null;
+    GameState.spawnCursor   = INITIAL_SPAWN_GAP;
+    GameState.elapsedPlayMs = 0;
+
+    // newBestAchieved is intentionally left as-is here: it's already been
+    // displayed on the game-over screen and will be cleared on the next death.
 }
 
 // ── Game loop ─────────────────────────────────────────────────
@@ -1475,6 +1622,10 @@ function gameLoop(timestamp) {
 
 // ── Bootstrap ─────────────────────────────────────────────────
 window.addEventListener('resize', resize);
+
+// M6: load stored high score before first frame so the start screen
+// shows the correct value immediately.
+loadHighScore();
 
 resize();  // set initial pixel dimensions and draw first frame
 
