@@ -27,19 +27,23 @@
 <script>
 'use strict';
 // ============================================================
-//  DashRunner — Ticket M1: Canvas Scaffold & Scrolling Game Loop
+//  DashRunner — Full Game (M1–M7)
 //
 //  Single self-contained HTML file. Zero external dependencies.
 //  Vanilla JS + HTML5 Canvas 2D. No build step, opens from file://.
 //
 //  Implements:
-//    • Full-screen canvas that resizes and redraws on window resize
-//    • requestAnimationFrame loop with dt clamped to 50ms (MAX_DT)
-//    • Scrolling 3-lane track background at constant speed
-//    • Static player rectangle centred in lane 1
-//    • GameState.phase routing: 'start' | 'playing' | 'dead'
-//    • Start screen + Game-Over screen stubs (canvas draws only,
-//      no innerHTML, no DOM string injection — security requirement)
+//    M1 • Full-screen canvas, requestAnimationFrame loop (dt ≤ 50ms),
+//         scrolling 3-lane track, static player placeholder
+//    M2 • Lane switch (instant snap, 100ms cooldown), jump arc (gravity
+//         tuned), slide / duck state; arrows + WASD + Space
+//    M3 • 9 ObstaclePatterns (P0–P8), AABB collision, 3-lives system,
+//         2-second invincibility flash
+//    M4 • Coin collection, magnet / shield power-ups, full HUD overlay
+//    M5 • Swipe gesture recognizer (canvas-scoped, iOS-safe)
+//    M6 • Start screen, Game-Over screen, localStorage high score
+//    M7 • Difficulty ramp: speed +20 px/s every 30s (cap 800), spawn gap
+//         narrows 10%/30s after 2 min (floor 50%), SPD tier HUD indicator
 // ============================================================
 
 // ── Tuning constants ─────────────────────────────────────────
@@ -83,6 +87,15 @@ const SWIPE_MIN_DELTA     = 30;   // px — minimum displacement for a valid swi
 const SWIPE_MAX_MS        = 250;  // ms — maximum gesture window (prevents slow drags)
 const SWIPE_PREVENT_PX    = 10;   // px — delta at which touchmove begins calling preventDefault
 const SLIDE_AUTO_RELEASE_MS = 500; // ms — auto-release slide after a swipe-down gesture
+
+// ── M7: Difficulty ramp constants ─────────────────────────────
+const SPEED_RAMP_INTERVAL  = 30000;  // ms — track speed increases every 30 seconds
+const SPEED_INCREMENT      = 20;     // px/s added each 30-second interval
+const MAX_TRACK_SPEED      = 800;    // px/s cap — keeps game playable at peak difficulty
+const GAP_NARROW_START_MS  = 120000; // 2-minute mark — gap narrowing activates after this
+const GAP_NARROW_INTERVAL  = 30000;  // ms — gap reduces every 30s past the 2-min mark
+const GAP_NARROW_PER_STEP  = 0.10;  // fraction removed per interval (10%)
+const GAP_NARROW_MIN_FRAC  = 0.50;  // floor — spawn gap never drops below 50% of original
 
 // Obstacle heights / vertical offsets (relative to groundY, upward)
 // barrier: tall ground block — player must JUMP over
@@ -144,9 +157,10 @@ let laneW     = 0;   // width of one lane in px
 // Scrolling state
 let trackScrollX = 0;  // cumulative scroll distance in px; wraps every frame modulo
 
-// ── M3: Obstacle patterns ─────────────────────────────────────
-// 7 templates ordered simple → complex. Spawn manager picks them in order
-// and only unlocks multi-lane patterns after the player has survived long enough.
+// ── M3+M7: Obstacle patterns ──────────────────────────────────
+// 9 templates ordered simple → complex. Spawn manager picks them in order
+// and only unlocks multi-lane patterns (P5–P8) after 20s of play.
+// M7 adds P7 and P8 for more variety at higher difficulty tiers.
 // Slot fields: lane (0-2), type ('barrier'|'overhead'|'low'), relativeX (px offset).
 // safeGapAfter: minimum world-scroll distance (px) before next pattern can spawn.
 const OBSTACLE_PATTERNS = [
@@ -186,6 +200,7 @@ const OBSTACLE_PATTERNS = [
         minSpeed: 0, safeGapAfter: 550,
     },
     // ── P6: Barrier lane 0 + overhead lane 1 — dodge combo ────
+    //         Forces player into lane 2 (or jump + lane 0).
     //         (only unlocked after 20s play)
     {
         id: 6,
@@ -194,6 +209,29 @@ const OBSTACLE_PATTERNS = [
             { lane: 1, type: 'overhead', relativeX: 0 },
         ],
         minSpeed: 0, safeGapAfter: 520,
+    },
+    // ── P7: Barriers in lanes 0 & 1 — must be in lane 2 ───────
+    //         Mirror of P5 but shifted right so lane 2 is the safe escape.
+    //         (only unlocked after 20s play)
+    {
+        id: 7,
+        slots: [
+            { lane: 0, type: 'barrier', relativeX: 0 },
+            { lane: 1, type: 'barrier', relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 550,
+    },
+    // ── P8: Overhead lane 0 + low beam lane 2 — lane-1 safe zone ─
+    //         Player must stay in lane 1 (or slide in lanes 0/2).
+    //         Tests that the player can read two different overhead types.
+    //         (only unlocked after 20s play)
+    {
+        id: 8,
+        slots: [
+            { lane: 0, type: 'overhead', relativeX: 0 },
+            { lane: 2, type: 'low',      relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 510,
     },
 ];
 
@@ -484,9 +522,21 @@ function spawnPowerUp() {
     });
 }
 
+// ── M7: Gap multiplier for difficulty ramp ───────────────────
+// Returns 1.0 for the first 2 minutes of play; after that, reduces by
+// GAP_NARROW_PER_STEP (10%) for every 30-second interval, flooring at
+// GAP_NARROW_MIN_FRAC (50%) so patterns never become impossibly dense.
+function getGapMultiplier() {
+    if (GameState.elapsedPlayMs < GAP_NARROW_START_MS) return 1.0;
+    const steps = Math.floor(
+        (GameState.elapsedPlayMs - GAP_NARROW_START_MS) / GAP_NARROW_INTERVAL
+    );
+    return Math.max(GAP_NARROW_MIN_FRAC, 1.0 - steps * GAP_NARROW_PER_STEP);
+}
+
 // ── M3: Pattern selection ─────────────────────────────────────
 // First 5 patterns (P0-P4) are simple single-lane obstacles. Complex
-// multi-lane patterns (P5, P6) unlock after 20s of play time to ensure
+// multi-lane patterns (P5-P8) unlock after 20s of play time to ensure
 // the first 60s never produces an impossible combination.
 function pickPattern() {
     const COMPLEX_UNLOCK_MS = 20000;  // 20 seconds before complex patterns appear
@@ -524,8 +574,9 @@ function spawnPattern(pattern) {
         updateObstacleHitbox(obs);
         obstacles.push(obs);
     });
-    // Advance spawn cursor; trigger fires again after safeGapAfter more px scroll
-    GameState.spawnCursor += pattern.safeGapAfter;
+    // M7: Advance spawn cursor scaled by difficulty gap multiplier.
+    // Before 2 min: multiplier = 1.0 (full gap). After 2 min: shrinks toward 50%.
+    GameState.spawnCursor += Math.round(pattern.safeGapAfter * getGapMultiplier());
 
     // M4: place coins in the safe (non-blocked) lanes for this pattern
     spawnCoinsForPattern(pattern, baseX);
@@ -921,6 +972,15 @@ function update(dt) {
 
     GameState.elapsedPlayMs += dt * 1000;
 
+    // M7: Difficulty ramp — track speed increases every 30 seconds of play.
+    // Recalculating from elapsedPlayMs each frame is cheaper than managing
+    // a separate timer and avoids drift from dt accumulation.
+    const speedTicks = Math.floor(GameState.elapsedPlayMs / SPEED_RAMP_INTERVAL);
+    GameState.trackSpeed = Math.min(
+        INITIAL_TRACK_SPEED + speedTicks * SPEED_INCREMENT,
+        MAX_TRACK_SPEED
+    );
+
     // Convert scrolled pixels to metres (scale factor keeps displayed
     // values human-friendly; 100 px ≈ 1 m at initial speed).
     GameState.distanceM += GameState.trackSpeed * dt / 100;
@@ -1152,6 +1212,25 @@ function drawHUD(W, H) {
     for (let i = 0; i < 3; i++) {
         ctx.fillStyle = i < GameState.lives ? '#ff4444' : '#333333';
         ctx.fillRect(12 + i * pipGap, 12, pipSize, pipSize);
+    }
+
+    // ── M7: Speed tier indicator (below life pips, top-right) ────
+    // Shows a subtle "SPD ×N" badge when the track speed has been
+    // ramped above the initial value, giving players feedback that the
+    // difficulty is escalating. Only renders during active play.
+    const speedTier = Math.floor(
+        (GameState.trackSpeed - INITIAL_TRACK_SPEED) / SPEED_INCREMENT
+    );
+    if (speedTier > 0) {
+        const spSz = clamp(Math.floor(H * 0.022), 9, 15);
+        ctx.font      = `bold ${spSz}px 'Courier New', monospace`;
+        ctx.textAlign = 'right';
+        // Colour-shift: green → amber → red as tier increases
+        const tierFrac  = Math.min(speedTier / 15, 1.0);  // 15 tiers max before cap
+        const r = Math.round(80  + tierFrac * 175);        // 80 → 255
+        const g = Math.round(220 - tierFrac * 170);        // 220 → 50
+        ctx.fillStyle = `rgb(${r},${g},40)`;
+        ctx.fillText(`SPD ×${speedTier + 1}`, W - 14, 12 + hSz + 4 + coinSz + 6);
     }
 
     // ── Active power-up indicator (below life pips, top-left) ─
