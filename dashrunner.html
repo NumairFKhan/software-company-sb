@@ -69,6 +69,15 @@ const INVINCIBILITY_MS   = 2000;  // ms of invincibility after a hit
 const HITBOX_SHRINK      = 0.12;  // 12% shrink on each axis edge → generous feel
 const OBS_W              = 50;    // obstacle sprite width (px)
 
+// ── M4: Coin & Power-up constants ─────────────────────────────
+const COIN_RADIUS        = 10;    // visual radius (px)
+const COIN_HB_HALF       = 12;    // hitbox half-size (px) — slightly generous
+const POWERUP_SIZE       = 26;    // power-up visual square width + hitbox (px)
+const MAGNET_RADIUS      = 120;   // px — magnetic pull radius around player
+const MAGNET_DURATION    = 5000;  // ms magnet effect lasts
+const COIN_MAGNET_SPEED  = 350;   // px/s when coin is magnetically pulled
+const POWERUP_SPAWN_DIST = 500;   // distance metres between power-up spawns
+
 // Obstacle heights / vertical offsets (relative to groundY, upward)
 // barrier: tall ground block — player must JUMP over
 const OBS_BARRIER_H      = PLAYER_H + 10;  // 70px; taller than the player
@@ -186,6 +195,17 @@ const OBSTACLE_PATTERNS = [
 let obstacles      = [];   // active Obstacle objects
 let nextObstacleId = 0;    // monotonic id counter
 let patternIndex   = 0;    // which OBSTACLE_PATTERNS index to spawn next
+
+// ── M4: Coin & Power-up runtime state ─────────────────────────
+// Coin entity: { id, lane, screenX, collected, magnetPulled, hitbox }
+// PowerUp entity: { id, lane, screenX, type:'magnet'|'shield', pickedUp, hitbox }
+// ActiveEffect singleton lives in GameState.activeEffect:
+//   { type: 'magnet'|'shield', remainingMs }  (remainingMs=-1 for shield = 1-hit absorb)
+let coins          = [];
+let powerUps       = [];
+let nextCoinId     = 0;
+let nextPowerUpId  = 0;
+let nextPowerUpDistM = POWERUP_SPAWN_DIST;  // distance milestone for next power-up spawn
 
 // ── M2: Player movement state ─────────────────────────────────
 let laneCooldown = 0;   // ms remaining; prevents rapid double-tap lane switches
@@ -378,6 +398,86 @@ function aabbOverlap(a, b) {
            a.y + a.h > b.y;
 }
 
+// ── M4: Coin & Power-up helpers ───────────────────────────────
+
+// Coins float at half the player's body height above the ground —
+// the running player hitbox easily overlaps them.
+function getCoinScreenY() {
+    return groundY - PLAYER_H * 0.5;
+}
+
+function updateCoinHitbox(coin) {
+    const cy = getCoinScreenY();
+    coin.hitbox.x = coin.screenX - COIN_HB_HALF;
+    coin.hitbox.y = cy - COIN_HB_HALF;
+    coin.hitbox.w = COIN_HB_HALF * 2;
+    coin.hitbox.h = COIN_HB_HALF * 2;
+}
+
+// Power-ups float at upper-body height so they're collectible while running.
+// Center Y = groundY - PLAYER_H * 0.75 puts the power-up inside the top quarter
+// of the player's running hitbox — visible and easily collected.
+function getPowerUpScreenY() {
+    return groundY - PLAYER_H * 0.75 - POWERUP_SIZE / 2;
+}
+
+function updatePowerUpHitbox(pu) {
+    const py = getPowerUpScreenY();
+    pu.hitbox.x = pu.screenX - POWERUP_SIZE / 2;
+    pu.hitbox.y = py;
+    pu.hitbox.w = POWERUP_SIZE;
+    pu.hitbox.h = POWERUP_SIZE;
+}
+
+// ── M4: Spawn coins alongside a pattern ───────────────────────
+// Coins are positioned so that a coin in lane L starts off the right edge
+// and arrives at getLaneCenterX(L) at the same time the associated
+// obstacle reaches the player position. This ensures coins are visually
+// in their correct lane column when the player would collect them.
+//
+// Starting screenX formula:
+//   screenX = getLaneCenterX(lane) + baseX + ci * 32
+// where baseX = canvas.width + OBS_W + 20 is the obstacle's spawn X.
+// The extra baseX offset ensures the coin starts beyond the right edge.
+function spawnCoinsForPattern(pattern, baseX) {
+    const blockedLanes = new Set(pattern.slots.map(s => s.lane));
+    const safeLanes    = [0, 1, 2].filter(l => !blockedLanes.has(l));
+
+    safeLanes.forEach(lane => {
+        // 3-coin cluster per safe lane, spread 32px apart in the scroll direction.
+        // Starting screenX = laneCenter + baseX + offset, so coins start
+        // roughly baseX pixels past the right edge, aligned to their lane column.
+        for (let ci = 0; ci < 3; ci++) {
+            coins.push({
+                id:           nextCoinId++,
+                lane,
+                screenX:      getLaneCenterX(lane) + baseX + ci * 32,
+                collected:    false,
+                magnetPulled: false,
+                hitbox:       { x: 0, y: 0, w: 0, h: 0 },
+            });
+        }
+    });
+}
+
+// ── M4: Spawn a power-up ──────────────────────────────────────
+// Alternates type by id parity so both types appear regularly.
+// Uses round-robin lane assignment so power-ups spread across all lanes.
+function spawnPowerUp() {
+    const lane = nextPowerUpId % NUM_LANES;           // round-robin lanes: 0,1,2,0,1,2,...
+    const type = nextPowerUpId % 2 === 0 ? 'magnet' : 'shield';
+    // Start just past the right edge, aligned to the lane column.
+    const spawnX = getLaneCenterX(lane) + canvas.width + POWERUP_SIZE + 20;
+    powerUps.push({
+        id:       nextPowerUpId++,
+        lane,
+        screenX:  spawnX,
+        type,
+        pickedUp: false,
+        hitbox:   { x: 0, y: 0, w: 0, h: 0 },
+    });
+}
+
 // ── M3: Pattern selection ─────────────────────────────────────
 // First 5 patterns (P0-P4) are simple single-lane obstacles. Complex
 // multi-lane patterns (P5, P6) unlock after 20s of play time to ensure
@@ -402,6 +502,7 @@ function pickPattern() {
 // ── M3: Spawn a pattern ───────────────────────────────────────
 // Each obstacle in the pattern starts just off the right edge of the canvas.
 // relativeX allows multi-obstacle patterns to have different X offsets.
+// M4: also spawns coins in the lanes NOT blocked by this pattern.
 function spawnPattern(pattern) {
     const baseX = canvas.width + OBS_W + 20;  // just beyond right edge
     pattern.slots.forEach(slot => {
@@ -419,6 +520,9 @@ function spawnPattern(pattern) {
     });
     // Advance spawn cursor; trigger fires again after safeGapAfter more px scroll
     GameState.spawnCursor += pattern.safeGapAfter;
+
+    // M4: place coins in the safe (non-blocked) lanes for this pattern
+    spawnCoinsForPattern(pattern, baseX);
 }
 
 // ── M3: Try to spawn the next pattern ────────────────────────
@@ -443,7 +547,18 @@ function checkCollisions() {
 }
 
 // ── M3: Handle a hit event ────────────────────────────────────
+// M4: shield effect intercepts the first hit and absorbs it.
 function handleHit() {
+    // M4: active shield absorbs one hit, then dissipates
+    if (GameState.activeEffect && GameState.activeEffect.type === 'shield') {
+        GameState.activeEffect = null;
+        // Grant a brief invincibility window after the shield breaks
+        // so the player doesn't take immediate follow-on damage
+        Player.invincible      = true;
+        Player.invincibleTimer = INVINCIBILITY_MS;
+        return;
+    }
+
     GameState.lives--;
     Player.lives = GameState.lives;
 
@@ -489,6 +604,182 @@ function updateObstacles(dt) {
             Player.invincibleTimer = 0;
         }
     }
+}
+
+// ── M4: Update coins each frame ───────────────────────────────
+// • Normal coins scroll left at trackSpeed.
+// • Within MAGNET_RADIUS of player while magnet is active: pulled toward player.
+// • Collected when AABB overlaps player hitbox.
+// • Culled when scrolled off the left edge.
+// Uses in-place write-pointer compaction to avoid allocating a new array each frame.
+function updateCoins(dt) {
+    const scrollDelta  = GameState.trackSpeed * dt;
+    const magnetActive = GameState.activeEffect !== null &&
+                         GameState.activeEffect.type === 'magnet';
+    const playerCY     = Player.y + Player.height * 0.5;
+    const coinCY       = getCoinScreenY();
+
+    let write = 0;
+    for (let i = 0; i < coins.length; i++) {
+        const coin = coins[i];
+
+        if (coin.collected) continue;  // skip; will be dropped by write-pointer
+
+        if (coin.magnetPulled) {
+            // Fly directly toward player's center X, ignoring normal scroll.
+            // Y is fixed (coins are always on the ground plane).
+            const dx   = Player.x - coin.screenX;
+            const dist = Math.abs(dx) || 1;
+            const step = Math.min(COIN_MAGNET_SPEED * dt, dist);
+            coin.screenX += (dx > 0 ? 1 : -1) * step;
+        } else {
+            // Normal scroll left
+            coin.screenX -= scrollDelta;
+
+            // Check if newly within magnet pull radius
+            if (magnetActive) {
+                const dx   = Player.x - coin.screenX;
+                const dy   = playerCY - coinCY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist <= MAGNET_RADIUS) {
+                    coin.magnetPulled = true;
+                }
+            }
+        }
+
+        // Reset magnetPulled if magnet effect expired mid-frame
+        if (!magnetActive) {
+            coin.magnetPulled = false;
+        }
+
+        // Update hitbox, then test collection
+        updateCoinHitbox(coin);
+        if (aabbOverlap(Player.hitbox, coin.hitbox)) {
+            coin.collected = true;
+            GameState.coins++;
+            continue;  // collected — drop via write pointer
+        }
+
+        // Cull coins that have scrolled fully past the left edge
+        if (coin.screenX + COIN_RADIUS < -20) continue;
+
+        coins[write++] = coin;
+    }
+    coins.length = write;
+}
+
+// ── M4: Update power-ups each frame ──────────────────────────
+// Power-ups scroll left, are picked up on AABB overlap, and are culled off-screen.
+// Active effect timer is ticked here; magnet expires on timer, shield expires on hit.
+function updatePowerUps(dt) {
+    const scrollDelta = GameState.trackSpeed * dt;
+
+    let write = 0;
+    for (let i = 0; i < powerUps.length; i++) {
+        const pu = powerUps[i];
+        if (pu.pickedUp) continue;
+
+        pu.screenX -= scrollDelta;
+        updatePowerUpHitbox(pu);
+
+        if (aabbOverlap(Player.hitbox, pu.hitbox)) {
+            pu.pickedUp = true;
+            // Activate the effect, replacing any existing one
+            if (pu.type === 'magnet') {
+                GameState.activeEffect = { type: 'magnet', remainingMs: MAGNET_DURATION };
+            } else {
+                // Shield: remainingMs = -1 means "lasts until hit, no timer"
+                GameState.activeEffect = { type: 'shield', remainingMs: -1 };
+            }
+            continue;  // picked up — drop via write pointer
+        }
+
+        // Cull off-screen power-ups
+        if (pu.screenX + POWERUP_SIZE < -20) continue;
+
+        powerUps[write++] = pu;
+    }
+    powerUps.length = write;
+
+    // Tick the active magnet timer (shield has remainingMs=-1, skip timer)
+    if (GameState.activeEffect && GameState.activeEffect.type === 'magnet') {
+        GameState.activeEffect.remainingMs -= dt * 1000;
+        if (GameState.activeEffect.remainingMs <= 0) {
+            GameState.activeEffect = null;
+        }
+    }
+}
+
+// ── M4: Distance-triggered power-up spawning ─────────────────
+// Spawns one power-up approximately every POWERUP_SPAWN_DIST metres.
+function trySpawnPowerUp() {
+    if (GameState.distanceM >= nextPowerUpDistM) {
+        spawnPowerUp();
+        nextPowerUpDistM = GameState.distanceM + POWERUP_SPAWN_DIST;
+    }
+}
+
+// ── M4: Draw coins ────────────────────────────────────────────
+function drawCoins() {
+    const cy = getCoinScreenY();
+    ctx.save();
+    ctx.lineWidth = 2;
+    for (let i = 0; i < coins.length; i++) {
+        const coin = coins[i];
+        if (coin.collected) continue;
+        const cx = coin.screenX;
+        if (cx + COIN_RADIUS < 0 || cx - COIN_RADIUS > canvas.width) continue;
+
+        // Outer gold circle
+        ctx.beginPath();
+        ctx.arc(cx, cy, COIN_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle   = '#FFD700';
+        ctx.fill();
+        ctx.strokeStyle = '#CC9900';
+        ctx.stroke();
+
+        // Inner highlight — gives the coin a 3D coin look
+        ctx.beginPath();
+        ctx.arc(cx - 2, cy - 2, COIN_RADIUS * 0.45, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,200,0.55)';
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+// ── M4: Draw power-ups ────────────────────────────────────────
+function drawPowerUps() {
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    const puTopY = getPowerUpScreenY();
+    for (let i = 0; i < powerUps.length; i++) {
+        const pu = powerUps[i];
+        if (pu.pickedUp) continue;
+        const px = pu.screenX - POWERUP_SIZE / 2;
+        const py = puTopY;
+        if (px + POWERUP_SIZE < 0 || px > canvas.width) continue;
+
+        if (pu.type === 'magnet') {
+            ctx.fillStyle   = '#00FFCC';
+            ctx.strokeStyle = '#009977';
+        } else {
+            ctx.fillStyle   = '#4499FF';
+            ctx.strokeStyle = '#0055CC';
+        }
+
+        ctx.lineWidth = 2;
+        ctx.fillRect(px, py, POWERUP_SIZE, POWERUP_SIZE);
+        ctx.strokeRect(px, py, POWERUP_SIZE, POWERUP_SIZE);
+
+        // Letter label — 'M' for magnet, 'S' for shield
+        ctx.fillStyle = '#001122';
+        ctx.font      = `bold ${POWERUP_SIZE - 8}px monospace`;
+        ctx.fillText(pu.type === 'magnet' ? 'M' : 'S',
+                     pu.screenX, py + POWERUP_SIZE / 2);
+    }
+    ctx.restore();
 }
 
 // ── M3: Draw obstacles ────────────────────────────────────────
@@ -571,6 +862,11 @@ function update(dt) {
 
     // M3: obstacle spawning, scrolling, collision detection, invincibility
     updateObstacles(dt);
+
+    // M4: coin scrolling, magnet pull, collection; power-up scrolling & pickup
+    updateCoins(dt);
+    updatePowerUps(dt);
+    trySpawnPowerUp();
 }
 
 // ── Draw ─────────────────────────────────────────────────────
@@ -587,8 +883,10 @@ function draw() {
     drawSky(W, H);
     drawTrack(W, H);
     drawObstacles();   // M3: draw before player so player renders on top
+    drawCoins();       // M4: coins beneath player
+    drawPowerUps();    // M4: power-ups beneath player
     drawPlayer();
-    drawHUD(W, H);     // M3: minimal HUD showing lives (M4 will expand this)
+    drawHUD(W, H);     // M4: full HUD — distance, coins, lives, active effect
 
     if (GameState.phase === 'start') {
         drawStartOverlay(W, H);
@@ -753,20 +1051,29 @@ function drawPlayer() {
     ctx.restore();
 }
 
-// ── M3: Minimal HUD (lives pips + distance) ───────────────────
-// M4 will add coin count and power-up display; this stub keeps it visible during M3 testing.
+// ── M4: Full HUD overlay ──────────────────────────────────────
+// Rendered last so it sits on top of all game objects.
+// All values come from GameState — no per-frame object allocation.
+// Security: uses fillText only (never innerHTML) — safe for shared hosting.
 function drawHUD(W, H) {
     if (GameState.phase !== 'playing') return;
 
     ctx.save();
     ctx.textBaseline = 'top';
 
-    // ── Distance label (top-right) ───────────────────────────
+    // ── Distance label (top-right) ────────────────────────────
     const hSz = clamp(Math.floor(H * 0.030), 12, 22);
     ctx.font      = `bold ${hSz}px 'Courier New', monospace`;
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'right';
-    ctx.fillText(`${Math.floor(GameState.distanceM)} m`, W - 14, 12);
+    ctx.fillText(Math.floor(GameState.distanceM) + ' m', W - 14, 12);
+
+    // ── Coin count (below distance, top-right) ────────────────
+    const coinSz = clamp(Math.floor(H * 0.026), 10, 18);
+    ctx.font      = `${coinSz}px 'Courier New', monospace`;
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'right';
+    ctx.fillText('● ' + GameState.coins, W - 14, 12 + hSz + 4);
 
     // ── Life pips (top-left, three coloured squares) ──────────
     const pipSize = clamp(Math.floor(H * 0.028), 10, 20);
@@ -774,6 +1081,26 @@ function drawHUD(W, H) {
     for (let i = 0; i < 3; i++) {
         ctx.fillStyle = i < GameState.lives ? '#ff4444' : '#333333';
         ctx.fillRect(12 + i * pipGap, 12, pipSize, pipSize);
+    }
+
+    // ── Active power-up indicator (below life pips, top-left) ─
+    const eff = GameState.activeEffect;
+    if (eff) {
+        const effY   = 12 + pipSize + 8;
+        const effSz  = clamp(Math.floor(H * 0.024), 10, 17);
+        ctx.font         = `bold ${effSz}px Arial, sans-serif`;
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+
+        if (eff.type === 'magnet') {
+            ctx.fillStyle = '#00FFCC';
+            const secsLeft = Math.max(0, Math.ceil(eff.remainingMs / 1000));
+            ctx.fillText('MAGNET ' + secsLeft + 's', 12, effY);
+        } else {
+            // shield: no timer, show icon only
+            ctx.fillStyle = '#4499FF';
+            ctx.fillText('SHIELD', 12, effY);
+        }
     }
 
     ctx.restore();
@@ -1008,6 +1335,13 @@ function startGame() {
     GameState.spawnCursor = INITIAL_SPAWN_GAP;
 
     trackScrollX = 0;
+
+    // M4: reset coin & power-up state
+    coins            = [];
+    powerUps         = [];
+    nextCoinId       = 0;
+    nextPowerUpId    = 0;
+    nextPowerUpDistM = POWERUP_SPAWN_DIST;
 }
 
 function restartGame() {
