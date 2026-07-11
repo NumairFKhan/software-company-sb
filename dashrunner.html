@@ -78,6 +78,12 @@ const MAGNET_DURATION    = 5000;  // ms magnet effect lasts
 const COIN_MAGNET_SPEED  = 350;   // px/s when coin is magnetically pulled
 const POWERUP_SPAWN_DIST = 500;   // distance metres between power-up spawns
 
+// ── M5: Swipe gesture constants ────────────────────────────────
+const SWIPE_MIN_DELTA     = 30;   // px — minimum displacement for a valid swipe
+const SWIPE_MAX_MS        = 250;  // ms — maximum gesture window (prevents slow drags)
+const SWIPE_PREVENT_PX    = 10;   // px — delta at which touchmove begins calling preventDefault
+const SLIDE_AUTO_RELEASE_MS = 500; // ms — auto-release slide after a swipe-down gesture
+
 // Obstacle heights / vertical offsets (relative to groundY, upward)
 // barrier: tall ground block — player must JUMP over
 const OBS_BARRIER_H      = PLAYER_H + 10;  // 70px; taller than the player
@@ -1299,6 +1305,107 @@ canvas.addEventListener('touchend', () => {
     if (GameState.phase === 'start')   startGame();
     else if (GameState.phase === 'dead') restartGame();
 }, { passive: true });
+
+// ── M5: SwipeRecognizer ───────────────────────────────────────
+// Handles all in-game swipe gestures. Wired to the same handleInput()
+// function as keyboard events — zero duplicate action logic.
+//
+// Design constraints (from technical spec):
+//   • touchmove listener MUST use { passive: false } on the canvas element
+//     (not window/document) to support calling preventDefault on iOS Safari 16+.
+//   • preventDefault is called ONLY while a gesture is in-flight AND movement
+//     exceeds SWIPE_PREVENT_PX — avoids breaking surrounding page scroll.
+//   • Minimum 30px delta + 250ms window prevents accidental trigger.
+//   • Direction: |dx| > |dy| → horizontal; |dy| > |dx| → vertical.
+//   • Slide swipe auto-releases after SLIDE_AUTO_RELEASE_MS (keyboard uses keyup;
+//     mobile swipe is instantaneous so we simulate the release via setTimeout).
+(function initSwipeRecognizer() {
+    let gestureActive = false;  // true while a single-finger gesture is in progress
+    let startX = 0, startY = 0, startT = 0;
+
+    // ── touchstart: record gesture origin ────────────────────
+    // passive:true — no need to preventDefault on gesture start.
+    // We capture the current GameState.phase at touchstart so that
+    // even if phase changes between touchstart and touchend (e.g. start/restart
+    // touchend fires first and calls startGame()), the SwipeRecognizer
+    // correctly ignores gestures that didn't begin during gameplay.
+    let gesturePhase = null;  // phase captured at touchstart; checked at touchend
+    canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) {
+            // Multi-touch cancels any pending single-finger gesture.
+            gestureActive = false;
+            gesturePhase  = null;
+            return;
+        }
+        const touch = e.touches[0];
+        startX        = touch.clientX;
+        startY        = touch.clientY;
+        startT        = performance.now();
+        gestureActive = true;
+        gesturePhase  = GameState.phase;  // snapshot; used in touchend
+    }, { passive: true });
+
+    // ── touchmove: prevent scroll conflict while swipe is live ─
+    // { passive: false } is REQUIRED here to call preventDefault on
+    // iOS Safari 16+. Listener is scoped to the canvas element only,
+    // so the surrounding page chrome scrolls normally when not touching
+    // the canvas.
+    canvas.addEventListener('touchmove', (e) => {
+        if (!gestureActive || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const dx    = touch.clientX - startX;
+        const dy    = touch.clientY - startY;
+        // Only block scroll after the gesture has clearly started moving.
+        if (Math.abs(dx) > SWIPE_PREVENT_PX || Math.abs(dy) > SWIPE_PREVENT_PX) {
+            e.preventDefault();
+        }
+    }, { passive: false });
+
+    // ── touchend: classify direction and fire action ──────────
+    canvas.addEventListener('touchend', (e) => {
+        if (!gestureActive) return;
+        gestureActive = false;
+
+        // Start/restart are handled by the separate touchend listener above.
+        // Swipe actions only apply to gestures that began during active gameplay.
+        // We check gesturePhase (captured at touchstart) rather than the current
+        // GameState.phase — this prevents a race where the start/restart touchend
+        // listener fires startGame() before this handler runs, making phase='playing'
+        // even though the gesture began on the start screen.
+        if (gesturePhase !== 'playing') return;
+
+        if (e.changedTouches.length === 0) return;
+        const touch = e.changedTouches[0];
+        const dx    = touch.clientX - startX;
+        const dy    = touch.clientY - startY;
+        const dtMs  = performance.now() - startT;
+
+        // Validate thresholds: ≥SWIPE_MIN_DELTA displacement, ≤SWIPE_MAX_MS duration.
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < SWIPE_MIN_DELTA || dtMs > SWIPE_MAX_MS) return;
+
+        // Classify: compare absolute deltas to determine dominant axis.
+        if (Math.abs(dx) > Math.abs(dy)) {
+            // Horizontal swipe → lane switch
+            handleInput(dx < 0 ? 'left' : 'right');
+        } else if (dy < 0) {
+            // Vertical swipe up → jump
+            handleInput('jump');
+        } else {
+            // Vertical swipe down → slide
+            // Keyboard uses keyup to release; for mobile we simulate the release
+            // after a fixed duration so the player doesn't get stuck sliding.
+            handleInput('slideStart');
+            setTimeout(() => handleInput('slideEnd'), SLIDE_AUTO_RELEASE_MS);
+        }
+    }, { passive: true });
+
+    // ── touchcancel: cancel gesture if interrupted ────────────
+    // (e.g. second finger touch, phone call notification, etc.)
+    canvas.addEventListener('touchcancel', () => {
+        gestureActive = false;
+    }, { passive: true });
+})();
 
 // ── Game-flow helpers ─────────────────────────────────────────
 function startGame() {
