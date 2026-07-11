@@ -1,0 +1,1719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>DashRunner</title>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+        }
+        canvas {
+            display: block;
+            /* CSS size = 100% so it fills the viewport visually;
+               the actual pixel dimensions are set in JS via canvas.width/height
+               to match window.innerWidth/innerHeight exactly. */
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+'use strict';
+// ============================================================
+//  DashRunner — Full Game (M1–M7)
+//
+//  Single self-contained HTML file. Zero external dependencies.
+//  Vanilla JS + HTML5 Canvas 2D. No build step, opens from file://.
+//
+//  Implements:
+//    M1 • Full-screen canvas, requestAnimationFrame loop (dt ≤ 50ms),
+//         scrolling 3-lane track, static player placeholder
+//    M2 • Lane switch (instant snap, 100ms cooldown), jump arc (gravity
+//         tuned), slide / duck state; arrows + WASD + Space
+//    M3 • 9 ObstaclePatterns (P0–P8), AABB collision, 3-lives system,
+//         2-second invincibility flash
+//    M4 • Coin collection, magnet / shield power-ups, full HUD overlay
+//    M5 • Swipe gesture recognizer (canvas-scoped, iOS-safe)
+//    M6 • Start screen, Game-Over screen, localStorage high score
+//    M7 • Difficulty ramp: speed +20 px/s every 30s (cap 800), spawn gap
+//         narrows 10%/30s after 2 min (floor 50%), SPD tier HUD indicator
+// ============================================================
+
+// ── Tuning constants ─────────────────────────────────────────
+const NUM_LANES             = 3;
+const INITIAL_TRACK_SPEED   = 300;   // px/sec — how fast the world scrolls left
+const MAX_DT                = 0.05;  // 50ms cap; prevents tunneling on tab-blur
+
+// Track occupies the bottom TRACK_FRAC of the canvas height;
+// sky fills the top portion.
+const TRACK_FRAC   = 0.65;
+const GROUND_H     = 22;    // height of the ground strip at the bottom
+
+// Player visual dimensions
+const PLAYER_W = 40;
+const PLAYER_H = 60;
+
+// ── M2: Player movement constants ────────────────────────────
+// Jump physics — tune these for "feels right":
+//   Peak height ≈ JUMP_VY² / (2 × GRAVITY) ≈ 820² / 5600 ≈ 120 px
+//   Air time     ≈ 2 × JUMP_VY / GRAVITY    ≈ 2 × 820 / 2800 ≈ 0.59 s
+const GRAVITY          = 2800;  // px/s² downward acceleration
+const JUMP_VY          = -820;  // px/s initial upward velocity (negative = up)
+const LANE_COOLDOWN_MS = 100;   // ms between allowed lane-switch inputs
+
+// ── M3: Obstacle & collision constants ────────────────────────
+const INVINCIBILITY_MS   = 2000;  // ms of invincibility after a hit
+const HITBOX_SHRINK      = 0.12;  // 12% shrink on each axis edge → generous feel
+const OBS_W              = 50;    // obstacle sprite width (px)
+
+// ── M4: Coin & Power-up constants ─────────────────────────────
+const COIN_RADIUS        = 10;    // visual radius (px)
+const COIN_HB_HALF       = 12;    // hitbox half-size (px) — slightly generous
+const POWERUP_SIZE       = 26;    // power-up visual square width + hitbox (px)
+const MAGNET_RADIUS      = 120;   // px — magnetic pull radius around player
+const MAGNET_DURATION    = 5000;  // ms magnet effect lasts
+const COIN_MAGNET_SPEED  = 350;   // px/s when coin is magnetically pulled
+const POWERUP_SPAWN_DIST = 500;   // distance metres between power-up spawns
+
+// ── M5: Swipe gesture constants ────────────────────────────────
+const SWIPE_MIN_DELTA     = 30;   // px — minimum displacement for a valid swipe
+const SWIPE_MAX_MS        = 250;  // ms — maximum gesture window (prevents slow drags)
+const SWIPE_PREVENT_PX    = 10;   // px — delta at which touchmove begins calling preventDefault
+const SLIDE_AUTO_RELEASE_MS = 500; // ms — auto-release slide after a swipe-down gesture
+
+// ── M7: Difficulty ramp constants ─────────────────────────────
+const SPEED_RAMP_INTERVAL  = 30000;  // ms — track speed increases every 30 seconds
+const SPEED_INCREMENT      = 20;     // px/s added each 30-second interval
+const MAX_TRACK_SPEED      = 800;    // px/s cap — keeps game playable at peak difficulty
+const GAP_NARROW_START_MS  = 120000; // 2-minute mark — gap narrowing activates after this
+const GAP_NARROW_INTERVAL  = 30000;  // ms — gap reduces every 30s past the 2-min mark
+const GAP_NARROW_PER_STEP  = 0.10;  // fraction removed per interval (10%)
+const GAP_NARROW_MIN_FRAC  = 0.50;  // floor — spawn gap never drops below 50% of original
+
+// Obstacle heights / vertical offsets (relative to groundY, upward)
+// barrier: tall ground block — player must JUMP over
+const OBS_BARRIER_H      = PLAYER_H + 10;  // 70px; taller than the player
+// overhead: ceiling-hung beam — player must SLIDE under (running player hits it)
+const OBS_OVERHEAD_H     = Math.floor(PLAYER_H * 0.5 - 10);  // 20px
+// OBS_OVERHEAD_TOP = gap (px) between groundY and the BOTTOM edge of the overhead beam.
+// Must satisfy: PLAYER_H*0.5 < OBS_OVERHEAD_TOP < PLAYER_H so that
+//   running player top (groundY-PLAYER_H) is BELOW beam bottom (groundY-OBS_OVERHEAD_TOP) → HIT
+//   sliding player top (groundY-PLAYER_H*0.5) is ABOVE beam bottom                        → CLEAR
+const OBS_OVERHEAD_TOP   = Math.floor(PLAYER_H * 0.5) + 5;  // 35; satisfies 30 < 35 < 60
+// low: ceiling-hung beam positioned lower than overhead — also requires slide
+const OBS_LOW_H          = 18;
+const OBS_LOW_TOP        = Math.floor(PLAYER_H * 0.5) + 16;  // distance above groundY
+
+// Initial clear gap (in world-scroll px) before first obstacle spawns
+const INITIAL_SPAWN_GAP  = 300;   // ≈1s at default speed; obstacle then travels ~2.7s to reach player
+
+// ── GameState ─────────────────────────────────────────────────
+// Single source of truth for every subsequent ticket to read/write.
+// 'phase' drives which screen is rendered each frame.
+const GameState = {
+    phase: 'start',           // 'start' | 'playing' | 'dead'
+    distanceM: 0,             // metres travelled (displayed on HUD, M4)
+    trackSpeed: INITIAL_TRACK_SPEED,
+    score: 0,
+    coins: 0,
+    lives: 3,
+    activeEffect: null,       // { type: 'magnet'|'shield', remainingMs } — M4
+    spawnCursor: 0,           // world-X for next obstacle spawn — M3
+    elapsedPlayMs: 0,         // wall-clock play time; drives difficulty ramp — M7
+};
+
+// ── Player entity ─────────────────────────────────────────────
+// Full shape defined here so M2 can extend it without breaking M1.
+const Player = {
+    lane: 1,                  // 0=left  1=center  2=right
+    x: 0,                     // screen-X centre of sprite; updated by resize() & M2
+    y: 0,                     // screen-Y top of sprite; updated by resize() & M2
+    vy: 0,                    // vertical velocity for jump arc — M2
+    state: 'run',             // 'run' | 'jump' | 'slide' — M2
+    lives: 3,
+    invincible: false,
+    invincibleTimer: 0,       // ms remaining — M3
+    width: PLAYER_W,
+    height: PLAYER_H,
+    hitbox: { x: 0, y: 0, w: 0, h: 0 },
+};
+
+// ── Canvas & context ─────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+
+// Layout geometry — derived from canvas dimensions in resize()
+let trackTop  = 0;   // Y where the track surface begins
+let groundY   = 0;   // Y of the ground line (top of ground strip)
+let laneW     = 0;   // width of one lane in px
+
+// Scrolling state
+let trackScrollX = 0;  // cumulative scroll distance in px; wraps every frame modulo
+
+// ── M3+M7: Obstacle patterns ──────────────────────────────────
+// 9 templates ordered simple → complex. Spawn manager picks them in order
+// and only unlocks multi-lane patterns (P5–P8) after 20s of play.
+// M7 adds P7 and P8 for more variety at higher difficulty tiers.
+// Slot fields: lane (0-2), type ('barrier'|'overhead'|'low'), relativeX (px offset).
+// safeGapAfter: minimum world-scroll distance (px) before next pattern can spawn.
+const OBSTACLE_PATTERNS = [
+    // ── P0: Single centre barrier — jump over ──────────────────
+    {
+        id: 0, slots: [{ lane: 1, type: 'barrier', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 480,
+    },
+    // ── P1: Left barrier — jump over ──────────────────────────
+    {
+        id: 1, slots: [{ lane: 0, type: 'barrier', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 440,
+    },
+    // ── P2: Right barrier — jump over ─────────────────────────
+    {
+        id: 2, slots: [{ lane: 2, type: 'barrier', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 440,
+    },
+    // ── P3: Centre overhead beam — slide under ─────────────────
+    {
+        id: 3, slots: [{ lane: 1, type: 'overhead', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 420,
+    },
+    // ── P4: Right low beam — slide under (tighter clearance) ───
+    {
+        id: 4, slots: [{ lane: 2, type: 'low', relativeX: 0 }],
+        minSpeed: 0, safeGapAfter: 400,
+    },
+    // ── P5: Barriers in lanes 0 & 2 — must be in lane 1 ───────
+    //         (only unlocked after 15s play)
+    {
+        id: 5,
+        slots: [
+            { lane: 0, type: 'barrier', relativeX: 0 },
+            { lane: 2, type: 'barrier', relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 550,
+    },
+    // ── P6: Barrier lane 0 + overhead lane 1 — dodge combo ────
+    //         Forces player into lane 2 (or jump + lane 0).
+    //         (only unlocked after 20s play)
+    {
+        id: 6,
+        slots: [
+            { lane: 0, type: 'barrier',  relativeX: 0 },
+            { lane: 1, type: 'overhead', relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 520,
+    },
+    // ── P7: Barriers in lanes 0 & 1 — must be in lane 2 ───────
+    //         Mirror of P5 but shifted right so lane 2 is the safe escape.
+    //         (only unlocked after 20s play)
+    {
+        id: 7,
+        slots: [
+            { lane: 0, type: 'barrier', relativeX: 0 },
+            { lane: 1, type: 'barrier', relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 550,
+    },
+    // ── P8: Overhead lane 0 + low beam lane 2 — lane-1 safe zone ─
+    //         Player must stay in lane 1 (or slide in lanes 0/2).
+    //         Tests that the player can read two different overhead types.
+    //         (only unlocked after 20s play)
+    {
+        id: 8,
+        slots: [
+            { lane: 0, type: 'overhead', relativeX: 0 },
+            { lane: 2, type: 'low',      relativeX: 0 },
+        ],
+        minSpeed: 0, safeGapAfter: 510,
+    },
+];
+
+// ── M3: Obstacle runtime state ────────────────────────────────
+let obstacles      = [];   // active Obstacle objects
+let nextObstacleId = 0;    // monotonic id counter
+let patternIndex   = 0;    // which OBSTACLE_PATTERNS index to spawn next
+
+// ── M4: Coin & Power-up runtime state ─────────────────────────
+// Coin entity: { id, lane, screenX, collected, magnetPulled, hitbox }
+// PowerUp entity: { id, lane, screenX, type:'magnet'|'shield', pickedUp, hitbox }
+// ActiveEffect singleton lives in GameState.activeEffect:
+//   { type: 'magnet'|'shield', remainingMs }  (remainingMs=-1 for shield = 1-hit absorb)
+let coins          = [];
+let powerUps       = [];
+let nextCoinId     = 0;
+let nextPowerUpId  = 0;
+let nextPowerUpDistM = POWERUP_SPAWN_DIST;  // distance milestone for next power-up spawn
+
+// ── M2: Player movement state ─────────────────────────────────
+let laneCooldown = 0;   // ms remaining; prevents rapid double-tap lane switches
+let slideHeld    = false; // true while ArrowDown/S key is held down
+
+// ── Helpers ───────────────────────────────────────────────────
+function getLaneCenterX(lane) {
+    return (lane + 0.5) * laneW;
+}
+
+function clamp(val, lo, hi) {
+    return val < lo ? lo : val > hi ? hi : val;
+}
+
+// ── Player hitbox ─────────────────────────────────────────────
+// Hitbox varies by player state per the technical spec:
+//   run:   full width, full height
+//   jump:  slightly narrower (75% width) — generous feel on aerial passes
+//   slide: full width, half height, anchored to ground
+// M3 will add an additional 10–15% inset shrink for generous AABB collision.
+function updatePlayerHitbox() {
+    let pw, ph, px, py;
+
+    if (Player.state === 'slide') {
+        ph = Player.height * 0.5;
+        py = groundY - ph;
+        pw = Player.width;
+    } else if (Player.state === 'jump') {
+        // Narrower hitbox while airborne — makes clearing obstacles feel fairer
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width * 0.75;
+    } else {
+        // 'run' — full sprite bounds
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width;
+    }
+
+    px = Player.x - pw * 0.5;
+    Player.hitbox.x = px;
+    Player.hitbox.y = py;
+    Player.hitbox.w = pw;
+    Player.hitbox.h = ph;
+}
+
+// ── M2: Input action handler ──────────────────────────────────
+// Single entry-point for all player actions — wired to both keyboard (here)
+// and touch gestures (M5 will reuse this same function).
+// All state-machine transitions enforced here.
+function handleInput(action) {
+    if (GameState.phase !== 'playing') return;
+
+    switch (action) {
+        case 'left':
+            if (laneCooldown <= 0 && Player.lane > 0) {
+                Player.lane--;
+                Player.x      = getLaneCenterX(Player.lane);
+                laneCooldown  = LANE_COOLDOWN_MS;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'right':
+            if (laneCooldown <= 0 && Player.lane < NUM_LANES - 1) {
+                Player.lane++;
+                Player.x      = getLaneCenterX(Player.lane);
+                laneCooldown  = LANE_COOLDOWN_MS;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'jump':
+            // Valid only from 'run'; cannot jump while sliding
+            if (Player.state === 'run') {
+                Player.state = 'jump';
+                Player.vy    = JUMP_VY;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'slideStart':
+            // Valid only from 'run'; cannot slide mid-air
+            if (Player.state === 'run') {
+                Player.state = 'slide';
+                slideHeld    = true;
+                updatePlayerHitbox();
+            }
+            break;
+
+        case 'slideEnd':
+            slideHeld = false;
+            // Only exit slide if we are still in slide state
+            // (if we somehow jumped off before the key released, no-op)
+            if (Player.state === 'slide') {
+                Player.state = 'run';
+                Player.y     = groundY - Player.height;
+                updatePlayerHitbox();
+            }
+            break;
+    }
+}
+
+// ── M2: Player physics update ─────────────────────────────────
+// Called every frame (dt in seconds) while phase === 'playing'.
+function updatePlayer(dt) {
+    // Tick down the lane-switch cooldown
+    if (laneCooldown > 0) {
+        laneCooldown = Math.max(0, laneCooldown - dt * 1000);
+    }
+
+    if (Player.state === 'jump') {
+        // Apply gravity and integrate position
+        Player.vy += GRAVITY * dt;
+        Player.y  += Player.vy  * dt;
+
+        const landY = groundY - Player.height;
+        if (Player.y >= landY) {
+            // Landed — choose run or slide depending on whether key is still held
+            Player.y     = landY;
+            Player.vy    = 0;
+            Player.state = slideHeld ? 'slide' : 'run';
+        }
+    } else {
+        // Keep player anchored to the ground when not airborne
+        Player.y = groundY - Player.height;
+    }
+
+    updatePlayerHitbox();
+}
+
+// ── M3: Obstacle visual geometry ─────────────────────────────
+// Returns { yTop, h, color, outline } for each obstacle type.
+// yTop is the absolute canvas-Y of the obstacle's top edge (computed
+// each frame from groundY so it scales with canvas height on resize).
+function getObstacleGeometry(type) {
+    switch (type) {
+        case 'barrier':
+            // Tall block sitting on the ground; player must jump over it.
+            return {
+                yTop:    groundY - OBS_BARRIER_H,
+                h:       OBS_BARRIER_H,
+                color:   '#cc2222',
+                outline: '#ff5555',
+            };
+        case 'overhead':
+            // Ceiling-hung beam. Bottom edge is above the slide player's top,
+            // so running player hits it but sliding player clears it.
+            // Running player top  = groundY - PLAYER_H      (hits)
+            // Sliding player top  = groundY - PLAYER_H*0.5  (clears)
+            return {
+                yTop:    groundY - OBS_OVERHEAD_TOP - OBS_OVERHEAD_H,
+                h:       OBS_OVERHEAD_H,
+                color:   '#7722cc',
+                outline: '#bb66ff',
+            };
+        case 'low':
+            // Lower-hanging beam; same slide-to-clear logic, tighter margin.
+            return {
+                yTop:    groundY - OBS_LOW_TOP - OBS_LOW_H,
+                h:       OBS_LOW_H,
+                color:   '#cc6600',
+                outline: '#ffaa33',
+            };
+        default:
+            return { yTop: groundY - OBS_BARRIER_H, h: OBS_BARRIER_H, color: '#cc2222', outline: '#ff4444' };
+    }
+}
+
+// ── M3: Obstacle hitbox (AABB with HITBOX_SHRINK inset) ───────
+// Shrinking 12% on each side makes collisions feel generous/fair.
+// Called each frame after obs.screenX is updated.
+function updateObstacleHitbox(obs) {
+    const geo   = getObstacleGeometry(obs.type);
+    const insetX = OBS_W         * HITBOX_SHRINK;
+    const insetY = geo.h         * HITBOX_SHRINK;
+    obs.hitbox.x = obs.screenX   + insetX;
+    obs.hitbox.y = geo.yTop      + insetY;
+    obs.hitbox.w = OBS_W         - insetX * 2;
+    obs.hitbox.h = geo.h         - insetY * 2;
+    // Cache geo for drawObstacles (avoid double calculation)
+    obs._geo = geo;
+}
+
+// ── M3: AABB overlap test ─────────────────────────────────────
+function aabbOverlap(a, b) {
+    return a.x < b.x + b.w &&
+           a.x + a.w > b.x &&
+           a.y < b.y + b.h &&
+           a.y + a.h > b.y;
+}
+
+// ── M4: Coin & Power-up helpers ───────────────────────────────
+
+// Coins float at half the player's body height above the ground —
+// the running player hitbox easily overlaps them.
+function getCoinScreenY() {
+    return groundY - PLAYER_H * 0.5;
+}
+
+function updateCoinHitbox(coin) {
+    const cy = getCoinScreenY();
+    coin.hitbox.x = coin.screenX - COIN_HB_HALF;
+    coin.hitbox.y = cy - COIN_HB_HALF;
+    coin.hitbox.w = COIN_HB_HALF * 2;
+    coin.hitbox.h = COIN_HB_HALF * 2;
+}
+
+// Power-ups float at upper-body height so they're collectible while running.
+// Center Y = groundY - PLAYER_H * 0.75 puts the power-up inside the top quarter
+// of the player's running hitbox — visible and easily collected.
+function getPowerUpScreenY() {
+    return groundY - PLAYER_H * 0.75 - POWERUP_SIZE / 2;
+}
+
+function updatePowerUpHitbox(pu) {
+    const py = getPowerUpScreenY();
+    pu.hitbox.x = pu.screenX - POWERUP_SIZE / 2;
+    pu.hitbox.y = py;
+    pu.hitbox.w = POWERUP_SIZE;
+    pu.hitbox.h = POWERUP_SIZE;
+}
+
+// ── M4: Spawn coins alongside a pattern ───────────────────────
+// Coins are positioned so that a coin in lane L starts off the right edge
+// and arrives at getLaneCenterX(L) at the same time the associated
+// obstacle reaches the player position. This ensures coins are visually
+// in their correct lane column when the player would collect them.
+//
+// Starting screenX formula:
+//   screenX = getLaneCenterX(lane) + baseX + ci * 32
+// where baseX = canvas.width + OBS_W + 20 is the obstacle's spawn X.
+// The extra baseX offset ensures the coin starts beyond the right edge.
+function spawnCoinsForPattern(pattern, baseX) {
+    const blockedLanes = new Set(pattern.slots.map(s => s.lane));
+    const safeLanes    = [0, 1, 2].filter(l => !blockedLanes.has(l));
+
+    safeLanes.forEach(lane => {
+        // 3-coin cluster per safe lane, spread 32px apart in the scroll direction.
+        // Starting screenX = laneCenter + baseX + offset, so coins start
+        // roughly baseX pixels past the right edge, aligned to their lane column.
+        for (let ci = 0; ci < 3; ci++) {
+            coins.push({
+                id:           nextCoinId++,
+                lane,
+                screenX:      getLaneCenterX(lane) + baseX + ci * 32,
+                collected:    false,
+                magnetPulled: false,
+                hitbox:       { x: 0, y: 0, w: 0, h: 0 },
+            });
+        }
+    });
+}
+
+// ── M4: Spawn a power-up ──────────────────────────────────────
+// Alternates type by id parity so both types appear regularly.
+// Uses round-robin lane assignment so power-ups spread across all lanes.
+function spawnPowerUp() {
+    const lane = nextPowerUpId % NUM_LANES;           // round-robin lanes: 0,1,2,0,1,2,...
+    const type = nextPowerUpId % 2 === 0 ? 'magnet' : 'shield';
+    // Start just past the right edge, aligned to the lane column.
+    const spawnX = getLaneCenterX(lane) + canvas.width + POWERUP_SIZE + 20;
+    powerUps.push({
+        id:       nextPowerUpId++,
+        lane,
+        screenX:  spawnX,
+        type,
+        pickedUp: false,
+        hitbox:   { x: 0, y: 0, w: 0, h: 0 },
+    });
+}
+
+// ── M7: Gap multiplier for difficulty ramp ───────────────────
+// Returns 1.0 for the first 2 minutes of play; after that, reduces by
+// GAP_NARROW_PER_STEP (10%) for every 30-second interval, flooring at
+// GAP_NARROW_MIN_FRAC (50%) so patterns never become impossibly dense.
+function getGapMultiplier() {
+    if (GameState.elapsedPlayMs < GAP_NARROW_START_MS) return 1.0;
+    const steps = Math.floor(
+        (GameState.elapsedPlayMs - GAP_NARROW_START_MS) / GAP_NARROW_INTERVAL
+    );
+    return Math.max(GAP_NARROW_MIN_FRAC, 1.0 - steps * GAP_NARROW_PER_STEP);
+}
+
+// ── M3: Pattern selection ─────────────────────────────────────
+// First 5 patterns (P0-P4) are simple single-lane obstacles. Complex
+// multi-lane patterns (P5-P8) unlock after 20s of play time to ensure
+// the first 60s never produces an impossible combination.
+function pickPattern() {
+    const COMPLEX_UNLOCK_MS = 20000;  // 20 seconds before complex patterns appear
+    const simpleCount       = 5;      // P0–P4 are single-lane / always safe
+    const totalCount        = OBSTACLE_PATTERNS.length;
+
+    let maxId;
+    if (GameState.elapsedPlayMs < COMPLEX_UNLOCK_MS) {
+        maxId = simpleCount;   // only P0–P4
+    } else {
+        maxId = totalCount;    // all patterns
+    }
+
+    const p = OBSTACLE_PATTERNS[patternIndex % maxId];
+    patternIndex++;
+    return p;
+}
+
+// ── M3: Spawn a pattern ───────────────────────────────────────
+// Each obstacle in the pattern starts just off the right edge of the canvas.
+// relativeX allows multi-obstacle patterns to have different X offsets.
+// M4: also spawns coins in the lanes NOT blocked by this pattern.
+function spawnPattern(pattern) {
+    const baseX = canvas.width + OBS_W + 20;  // just beyond right edge
+    pattern.slots.forEach(slot => {
+        const obs = {
+            id:        nextObstacleId++,
+            lane:      slot.lane,
+            screenX:   baseX + slot.relativeX,
+            type:      slot.type,
+            patternId: pattern.id,
+            hitbox:    { x: 0, y: 0, w: 0, h: 0 },
+            _geo:      null,
+        };
+        updateObstacleHitbox(obs);
+        obstacles.push(obs);
+    });
+    // M7: Advance spawn cursor scaled by difficulty gap multiplier.
+    // Before 2 min: multiplier = 1.0 (full gap). After 2 min: shrinks toward 50%.
+    GameState.spawnCursor += Math.round(pattern.safeGapAfter * getGapMultiplier());
+
+    // M4: place coins in the safe (non-blocked) lanes for this pattern
+    spawnCoinsForPattern(pattern, baseX);
+}
+
+// ── M3: Try to spawn the next pattern ────────────────────────
+// spawnCursor tracks the accumulated trackScrollX value at which to trigger
+// the next spawn. Advances by safeGapAfter after each successful spawn.
+function trySpawnPatterns() {
+    while (GameState.phase === 'playing' &&
+           trackScrollX >= GameState.spawnCursor) {
+        spawnPattern(pickPattern());
+    }
+}
+
+// ── M3: Collision detection ────────────────────────────────────
+function checkCollisions() {
+    if (Player.invincible) return;
+    for (const obs of obstacles) {
+        if (aabbOverlap(Player.hitbox, obs.hitbox)) {
+            handleHit();
+            return;  // one hit per frame maximum
+        }
+    }
+}
+
+// ── M3: Handle a hit event ────────────────────────────────────
+// M4: shield effect intercepts the first hit and absorbs it.
+function handleHit() {
+    // M4: active shield absorbs one hit, then dissipates
+    if (GameState.activeEffect && GameState.activeEffect.type === 'shield') {
+        GameState.activeEffect = null;
+        // Grant a brief invincibility window after the shield breaks
+        // so the player doesn't take immediate follow-on damage
+        Player.invincible      = true;
+        Player.invincibleTimer = INVINCIBILITY_MS;
+        return;
+    }
+
+    GameState.lives--;
+    Player.lives = GameState.lives;
+
+    if (GameState.lives <= 0) {
+        GameState.lives  = 0;
+        Player.lives     = 0;
+        GameState.phase  = 'dead';
+        Player.invincible = false;
+        // M6: persist high score before rendering the game-over overlay.
+        // saveHighScore() also sets newBestAchieved so drawGameOverOverlay
+        // can show the "New Best!" badge on the very first dead frame.
+        saveHighScore();
+        return;
+    }
+
+    // Grant invincibility window
+    Player.invincible      = true;
+    Player.invincibleTimer = INVINCIBILITY_MS;
+}
+
+// ── M3: Update obstacle positions, spawn, collide, invincibility ─
+function updateObstacles(dt) {
+    const scrollDelta = GameState.trackSpeed * dt;
+
+    // Move obstacles left and refresh hitboxes
+    for (const obs of obstacles) {
+        obs.screenX -= scrollDelta;
+        updateObstacleHitbox(obs);
+    }
+
+    // Cull obstacles that have fully scrolled off the left edge
+    if (obstacles.length > 0 && obstacles[0].screenX + OBS_W < -60) {
+        obstacles.shift();
+    }
+
+    // Spawn the next pattern when the scroll cursor is reached
+    trySpawnPatterns();
+
+    // AABB collision (skip while invincible)
+    checkCollisions();
+
+    // Tick down invincibility timer
+    if (Player.invincible) {
+        Player.invincibleTimer -= dt * 1000;
+        if (Player.invincibleTimer <= 0) {
+            Player.invincible      = false;
+            Player.invincibleTimer = 0;
+        }
+    }
+}
+
+// ── M4: Update coins each frame ───────────────────────────────
+// • Normal coins scroll left at trackSpeed.
+// • Within MAGNET_RADIUS of player while magnet is active: pulled toward player.
+// • Collected when AABB overlaps player hitbox.
+// • Culled when scrolled off the left edge.
+// Uses in-place write-pointer compaction to avoid allocating a new array each frame.
+function updateCoins(dt) {
+    const scrollDelta  = GameState.trackSpeed * dt;
+    const magnetActive = GameState.activeEffect !== null &&
+                         GameState.activeEffect.type === 'magnet';
+    const playerCY     = Player.y + Player.height * 0.5;
+    const coinCY       = getCoinScreenY();
+
+    let write = 0;
+    for (let i = 0; i < coins.length; i++) {
+        const coin = coins[i];
+
+        if (coin.collected) continue;  // skip; will be dropped by write-pointer
+
+        if (coin.magnetPulled) {
+            // Fly directly toward player's center X, ignoring normal scroll.
+            // Y is fixed (coins are always on the ground plane).
+            const dx   = Player.x - coin.screenX;
+            const dist = Math.abs(dx) || 1;
+            const step = Math.min(COIN_MAGNET_SPEED * dt, dist);
+            coin.screenX += (dx > 0 ? 1 : -1) * step;
+        } else {
+            // Normal scroll left
+            coin.screenX -= scrollDelta;
+
+            // Check if newly within magnet pull radius
+            if (magnetActive) {
+                const dx   = Player.x - coin.screenX;
+                const dy   = playerCY - coinCY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist <= MAGNET_RADIUS) {
+                    coin.magnetPulled = true;
+                }
+            }
+        }
+
+        // Reset magnetPulled if magnet effect expired mid-frame
+        if (!magnetActive) {
+            coin.magnetPulled = false;
+        }
+
+        // Update hitbox, then test collection
+        updateCoinHitbox(coin);
+        if (aabbOverlap(Player.hitbox, coin.hitbox)) {
+            coin.collected = true;
+            GameState.coins++;
+            continue;  // collected — drop via write pointer
+        }
+
+        // Cull coins that have scrolled fully past the left edge
+        if (coin.screenX + COIN_RADIUS < -20) continue;
+
+        coins[write++] = coin;
+    }
+    coins.length = write;
+}
+
+// ── M4: Update power-ups each frame ──────────────────────────
+// Power-ups scroll left, are picked up on AABB overlap, and are culled off-screen.
+// Active effect timer is ticked here; magnet expires on timer, shield expires on hit.
+function updatePowerUps(dt) {
+    const scrollDelta = GameState.trackSpeed * dt;
+
+    let write = 0;
+    for (let i = 0; i < powerUps.length; i++) {
+        const pu = powerUps[i];
+        if (pu.pickedUp) continue;
+
+        pu.screenX -= scrollDelta;
+        updatePowerUpHitbox(pu);
+
+        if (aabbOverlap(Player.hitbox, pu.hitbox)) {
+            pu.pickedUp = true;
+            // Activate the effect, replacing any existing one
+            if (pu.type === 'magnet') {
+                GameState.activeEffect = { type: 'magnet', remainingMs: MAGNET_DURATION };
+            } else {
+                // Shield: remainingMs = -1 means "lasts until hit, no timer"
+                GameState.activeEffect = { type: 'shield', remainingMs: -1 };
+            }
+            continue;  // picked up — drop via write pointer
+        }
+
+        // Cull off-screen power-ups
+        if (pu.screenX + POWERUP_SIZE < -20) continue;
+
+        powerUps[write++] = pu;
+    }
+    powerUps.length = write;
+
+    // Tick the active magnet timer (shield has remainingMs=-1, skip timer)
+    if (GameState.activeEffect && GameState.activeEffect.type === 'magnet') {
+        GameState.activeEffect.remainingMs -= dt * 1000;
+        if (GameState.activeEffect.remainingMs <= 0) {
+            GameState.activeEffect = null;
+        }
+    }
+}
+
+// ── M4: Distance-triggered power-up spawning ─────────────────
+// Spawns one power-up approximately every POWERUP_SPAWN_DIST metres.
+function trySpawnPowerUp() {
+    if (GameState.distanceM >= nextPowerUpDistM) {
+        spawnPowerUp();
+        nextPowerUpDistM = GameState.distanceM + POWERUP_SPAWN_DIST;
+    }
+}
+
+// ── M6: High score persistence via localStorage ───────────────
+// Schema: dashrunner_hs → JSON { bestDistance: number, bestCoins: number }
+// Security: localStorage data is ONLY read via JSON.parse and written via
+// JSON.stringify — never injected into innerHTML or the DOM.
+// All canvas text uses fillText only.
+
+let highScore = { bestDistance: 0, bestCoins: 0 };
+let newBestAchieved = false;  // true after a run that beat the stored record
+
+// loadHighScore — reads dashrunner_hs from localStorage.
+// Wrapped in try/catch: private browsing mode on some browsers blocks
+// localStorage entirely and throws; malformed JSON is also caught safely.
+function loadHighScore() {
+    try {
+        const raw = localStorage.getItem('dashrunner_hs');
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (typeof parsed.bestDistance === 'number' && isFinite(parsed.bestDistance)) {
+                highScore.bestDistance = parsed.bestDistance;
+            }
+            if (typeof parsed.bestCoins === 'number' && isFinite(parsed.bestCoins)) {
+                highScore.bestCoins = parsed.bestCoins;
+            }
+        }
+    } catch (_e) {
+        // localStorage blocked or JSON malformed — safe to silently ignore.
+        // highScore stays at its default { bestDistance: 0, bestCoins: 0 }.
+    }
+}
+
+// saveHighScore — compares the just-finished run against the stored record.
+// Writes to localStorage only when at least one metric improves.
+// Sets newBestAchieved = true so the game-over overlay can show "New Best!".
+function saveHighScore() {
+    const dist  = Math.floor(GameState.distanceM);
+    const coins = GameState.coins;
+    let updated = false;
+
+    if (dist > highScore.bestDistance) {
+        highScore.bestDistance = dist;
+        updated = true;
+    }
+    if (coins > highScore.bestCoins) {
+        highScore.bestCoins = coins;
+        updated = true;
+    }
+
+    newBestAchieved = updated;
+
+    if (updated) {
+        try {
+            localStorage.setItem(
+                'dashrunner_hs',
+                JSON.stringify({ bestDistance: highScore.bestDistance, bestCoins: highScore.bestCoins })
+            );
+        } catch (_e) {
+            // localStorage blocked or storage quota exceeded — safe to ignore.
+        }
+    }
+}
+
+// ── M4: Draw coins ────────────────────────────────────────────
+function drawCoins() {
+    const cy = getCoinScreenY();
+    ctx.save();
+    ctx.lineWidth = 2;
+    for (let i = 0; i < coins.length; i++) {
+        const coin = coins[i];
+        if (coin.collected) continue;
+        const cx = coin.screenX;
+        if (cx + COIN_RADIUS < 0 || cx - COIN_RADIUS > canvas.width) continue;
+
+        // Outer gold circle
+        ctx.beginPath();
+        ctx.arc(cx, cy, COIN_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle   = '#FFD700';
+        ctx.fill();
+        ctx.strokeStyle = '#CC9900';
+        ctx.stroke();
+
+        // Inner highlight — gives the coin a 3D coin look
+        ctx.beginPath();
+        ctx.arc(cx - 2, cy - 2, COIN_RADIUS * 0.45, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,200,0.55)';
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+// ── M4: Draw power-ups ────────────────────────────────────────
+function drawPowerUps() {
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    const puTopY = getPowerUpScreenY();
+    for (let i = 0; i < powerUps.length; i++) {
+        const pu = powerUps[i];
+        if (pu.pickedUp) continue;
+        const px = pu.screenX - POWERUP_SIZE / 2;
+        const py = puTopY;
+        if (px + POWERUP_SIZE < 0 || px > canvas.width) continue;
+
+        if (pu.type === 'magnet') {
+            ctx.fillStyle   = '#00FFCC';
+            ctx.strokeStyle = '#009977';
+        } else {
+            ctx.fillStyle   = '#4499FF';
+            ctx.strokeStyle = '#0055CC';
+        }
+
+        ctx.lineWidth = 2;
+        ctx.fillRect(px, py, POWERUP_SIZE, POWERUP_SIZE);
+        ctx.strokeRect(px, py, POWERUP_SIZE, POWERUP_SIZE);
+
+        // Letter label — 'M' for magnet, 'S' for shield
+        ctx.fillStyle = '#001122';
+        ctx.font      = `bold ${POWERUP_SIZE - 8}px monospace`;
+        ctx.fillText(pu.type === 'magnet' ? 'M' : 'S',
+                     pu.screenX, py + POWERUP_SIZE / 2);
+    }
+    ctx.restore();
+}
+
+// ── M3: Draw obstacles ────────────────────────────────────────
+function drawObstacles() {
+    for (const obs of obstacles) {
+        const geo  = obs._geo || getObstacleGeometry(obs.type);
+        const x    = obs.screenX;
+        const y    = geo.yTop;
+        const w    = OBS_W;
+        const h    = geo.h;
+
+        // Skip if completely off-screen
+        if (x + w < 0 || x > canvas.width) continue;
+
+        ctx.save();
+
+        // Body fill
+        ctx.fillStyle = geo.color;
+        ctx.fillRect(x, y, w, h);
+
+        // Outline
+        ctx.strokeStyle = geo.outline;
+        ctx.lineWidth   = 2;
+        ctx.strokeRect(x, y, w, h);
+
+        // Type indicator: a lighter stripe across the middle
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        if (obs.type === 'barrier') {
+            // Diagonal cross-hatching on barrier
+            ctx.fillRect(x + 4, y + 4, w - 8, h * 0.3);
+            ctx.fillRect(x + 4, y + h * 0.65, w - 8, h * 0.3);
+        } else {
+            // Simple centre bar for overhead/low beams
+            ctx.fillRect(x + 4, y + h * 0.3, w - 8, h * 0.4);
+        }
+
+        ctx.restore();
+    }
+}
+
+// ── Resize ────────────────────────────────────────────────────
+// Called on load and every window resize.
+// Sets canvas pixel dimensions, recomputes layout, redraws immediately
+// to avoid the blank-frame flash that occurs if we wait for the next rAF.
+function resize() {
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const H = canvas.height;
+    const W = canvas.width;
+
+    trackTop = Math.round(H * (1 - TRACK_FRAC));
+    groundY  = H - GROUND_H;
+    laneW    = W / NUM_LANES;
+
+    // Anchor player to ground in current lane
+    Player.x = getLaneCenterX(Player.lane);
+    Player.y = groundY - Player.height;
+    updatePlayerHitbox();
+
+    draw();  // immediate redraw — no blank frame on resize
+}
+
+// ── Update ────────────────────────────────────────────────────
+// Called every frame with delta-time already clamped to MAX_DT.
+function update(dt) {
+    if (GameState.phase !== 'playing') return;
+
+    GameState.elapsedPlayMs += dt * 1000;
+
+    // M7: Difficulty ramp — track speed increases every 30 seconds of play.
+    // Recalculating from elapsedPlayMs each frame is cheaper than managing
+    // a separate timer and avoids drift from dt accumulation.
+    const speedTicks = Math.floor(GameState.elapsedPlayMs / SPEED_RAMP_INTERVAL);
+    GameState.trackSpeed = Math.min(
+        INITIAL_TRACK_SPEED + speedTicks * SPEED_INCREMENT,
+        MAX_TRACK_SPEED
+    );
+
+    // Convert scrolled pixels to metres (scale factor keeps displayed
+    // values human-friendly; 100 px ≈ 1 m at initial speed).
+    GameState.distanceM += GameState.trackSpeed * dt / 100;
+
+    // Advance the scroll position (used by drawTrack to offset markers)
+    trackScrollX += GameState.trackSpeed * dt;
+
+    // M2: player movement, jump arc, lane-switch cooldown
+    updatePlayer(dt);
+
+    // M3: obstacle spawning, scrolling, collision detection, invincibility
+    updateObstacles(dt);
+
+    // M4: coin scrolling, magnet pull, collection; power-up scrolling & pickup
+    updateCoins(dt);
+    updatePowerUps(dt);
+    trySpawnPowerUp();
+}
+
+// ── Draw ─────────────────────────────────────────────────────
+// Single entry point called each rAF tick.
+// Draw order: sky → track → player → UI overlay
+function draw() {
+    const W = canvas.width;
+    const H = canvas.height;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Game world renders on every frame regardless of phase;
+    // overlay screens are drawn on top.
+    drawSky(W, H);
+    drawTrack(W, H);
+    drawObstacles();   // M3: draw before player so player renders on top
+    drawCoins();       // M4: coins beneath player
+    drawPowerUps();    // M4: power-ups beneath player
+    drawPlayer();
+    drawHUD(W, H);     // M4: full HUD — distance, coins, lives, active effect
+
+    if (GameState.phase === 'start') {
+        drawStartOverlay(W, H);
+    } else if (GameState.phase === 'dead') {
+        drawGameOverOverlay(W, H);
+    }
+}
+
+// ── Sky ───────────────────────────────────────────────────────
+function drawSky(W, H) {
+    // Night-sky gradient above the track horizon
+    const grad = ctx.createLinearGradient(0, 0, 0, trackTop);
+    grad.addColorStop(0, '#0a1628');
+    grad.addColorStop(1, '#1a3a5c');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, trackTop);
+
+    // Warm horizon glow (subtle; fades into the track edge colour)
+    ctx.fillStyle = 'rgba(255, 120, 30, 0.12)';
+    ctx.fillRect(0, trackTop - 24, W, 24);
+}
+
+// ── Track ─────────────────────────────────────────────────────
+// Draws the road surface, scrolling lane markers, vertical lane dividers,
+// the ground strip, and the two border lines.
+function drawTrack(W, H) {
+    // ── Road surface ─────────────────────────────────────────
+    ctx.fillStyle = '#1e1e1e';
+    ctx.fillRect(0, trackTop, W, H - trackTop);
+
+    // Subtle alternating lane tints so lanes read as distinct columns
+    for (let i = 0; i < NUM_LANES; i++) {
+        ctx.fillStyle = i % 2 === 0
+            ? 'rgba(255,255,255,0.025)'
+            : 'rgba(0,0,0,0.04)';
+        ctx.fillRect(i * laneW, trackTop, laneW, groundY - trackTop);
+    }
+
+    // ── Scrolling road markers ────────────────────────────────
+    // Short horizontal rectangles that move right→left at trackSpeed,
+    // giving the visual impression of forward motion.
+    // They tile continuously: offset = trackScrollX % period so they wrap.
+    const mkW      = 52;    // dash width in px
+    const mkH      = 7;     // dash height in px
+    const period   = 170;   // px between successive dash starts
+    const mkMidY   = trackTop + (groundY - trackTop) * 0.5;  // vertical centre of road
+    const offset   = trackScrollX % period;
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
+
+    // Iterate enough steps to cover the full canvas width plus one period
+    // on each side so dashes are never clipped at the edges.
+    const count = Math.ceil(W / period) + 2;
+    for (let i = -1; i <= count; i++) {
+        const x = i * period - offset;
+        if (x + mkW > 0 && x < W) {
+            ctx.fillRect(x, mkMidY - mkH * 0.5, mkW, mkH);
+        }
+    }
+
+    // ── Lane dividers (vertical dashed lines) ────────────────
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.38)';
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([20, 14]);
+    for (let i = 1; i < NUM_LANES; i++) {
+        const x = i * laneW;
+        ctx.beginPath();
+        ctx.moveTo(x, trackTop + 6);
+        ctx.lineTo(x, groundY - 2);
+        ctx.stroke();
+    }
+    ctx.restore();
+
+    // ── Horizon border (top of track) ────────────────────────
+    ctx.strokeStyle = 'rgba(255, 150, 30, 0.70)';
+    ctx.lineWidth   = 3;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(0, trackTop);
+    ctx.lineTo(W, trackTop);
+    ctx.stroke();
+
+    // ── Ground strip ─────────────────────────────────────────
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(0, groundY, W, H - groundY);
+
+    // Ground border line (bottom of driveable surface)
+    ctx.strokeStyle = 'rgba(255, 150, 30, 0.65)';
+    ctx.lineWidth   = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(W, groundY);
+    ctx.stroke();
+}
+
+// ── Player ────────────────────────────────────────────────────
+// Rectangle-based representation with distinct visuals per state.
+// State colours:
+//   run   → bright cyan-green (default)
+//   jump  → yellow-green (airborne — clearly different, easy to read)
+//   slide → orange-amber (low/wide — signals ducked posture)
+// M3 will wire invincibility flash alpha oscillation.
+function drawPlayer() {
+    // Determine draw dimensions and position from current state
+    let pw, ph, px, py;
+    let bodyColor, outlineColor, detailColor;
+
+    if (Player.state === 'slide') {
+        ph = Player.height * 0.5;
+        py = groundY - ph;
+        pw = Player.width;
+        px = Player.x - pw * 0.5;
+        bodyColor    = '#ff9933';
+        outlineColor = '#cc6600';
+        detailColor  = '#cc5500';
+    } else if (Player.state === 'jump') {
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width * 0.75;   // narrower while airborne
+        px = Player.x - pw * 0.5;
+        bodyColor    = '#ccff33';
+        outlineColor = '#99cc00';
+        detailColor  = '#669900';
+    } else {
+        // 'run'
+        ph = Player.height;
+        py = Player.y;
+        pw = Player.width;
+        px = Player.x - pw * 0.5;
+        bodyColor    = '#00ff99';
+        outlineColor = '#00cc77';
+        detailColor  = '#009966';
+    }
+
+    ctx.save();
+
+    // Invincibility flash — M3 will set Player.invincible; hook is live now
+    ctx.globalAlpha = Player.invincible
+        ? (Math.floor(performance.now() / 150) % 2 === 0 ? 1.0 : 0.3)
+        : 1.0;
+
+    // Body
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(px, py, pw, ph);
+
+    // Outline
+    ctx.strokeStyle = outlineColor;
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(px, py, pw, ph);
+
+    // "Face" bar in upper quarter — different position per state to imply posture
+    ctx.fillStyle = detailColor;
+    if (Player.state === 'slide') {
+        // Slide: face bar shifted to the front (left side) — leaning forward
+        ctx.fillRect(px + pw * 0.05, py + ph * 0.15, pw * 0.55, ph * 0.30);
+    } else {
+        // Run & jump: standard upper-face bar
+        ctx.fillRect(px + pw * 0.15, py + ph * 0.08, pw * 0.70, ph * 0.18);
+    }
+
+    ctx.restore();
+}
+
+// ── M4: Full HUD overlay ──────────────────────────────────────
+// Rendered last so it sits on top of all game objects.
+// All values come from GameState — no per-frame object allocation.
+// Security: uses fillText only (never innerHTML) — safe for shared hosting.
+function drawHUD(W, H) {
+    if (GameState.phase !== 'playing') return;
+
+    ctx.save();
+    ctx.textBaseline = 'top';
+
+    // ── Distance label (top-right) ────────────────────────────
+    const hSz = clamp(Math.floor(H * 0.030), 12, 22);
+    ctx.font      = `bold ${hSz}px 'Courier New', monospace`;
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'right';
+    ctx.fillText(Math.floor(GameState.distanceM) + ' m', W - 14, 12);
+
+    // ── Coin count (below distance, top-right) ────────────────
+    const coinSz = clamp(Math.floor(H * 0.026), 10, 18);
+    ctx.font      = `${coinSz}px 'Courier New', monospace`;
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'right';
+    ctx.fillText('● ' + GameState.coins, W - 14, 12 + hSz + 4);
+
+    // ── Life pips (top-left, three coloured squares) ──────────
+    const pipSize = clamp(Math.floor(H * 0.028), 10, 20);
+    const pipGap  = pipSize + 4;
+    for (let i = 0; i < 3; i++) {
+        ctx.fillStyle = i < GameState.lives ? '#ff4444' : '#333333';
+        ctx.fillRect(12 + i * pipGap, 12, pipSize, pipSize);
+    }
+
+    // ── M7: Speed tier indicator (below life pips, top-right) ────
+    // Shows a subtle "SPD ×N" badge when the track speed has been
+    // ramped above the initial value, giving players feedback that the
+    // difficulty is escalating. Only renders during active play.
+    const speedTier = Math.floor(
+        (GameState.trackSpeed - INITIAL_TRACK_SPEED) / SPEED_INCREMENT
+    );
+    if (speedTier > 0) {
+        const spSz = clamp(Math.floor(H * 0.022), 9, 15);
+        ctx.font      = `bold ${spSz}px 'Courier New', monospace`;
+        ctx.textAlign = 'right';
+        // Colour-shift: green → amber → red as tier increases
+        const tierFrac  = Math.min(speedTier / 15, 1.0);  // 15 tiers max before cap
+        const r = Math.round(80  + tierFrac * 175);        // 80 → 255
+        const g = Math.round(220 - tierFrac * 170);        // 220 → 50
+        ctx.fillStyle = `rgb(${r},${g},40)`;
+        ctx.fillText(`SPD ×${speedTier + 1}`, W - 14, 12 + hSz + 4 + coinSz + 6);
+    }
+
+    // ── Active power-up indicator (below life pips, top-left) ─
+    const eff = GameState.activeEffect;
+    if (eff) {
+        const effY   = 12 + pipSize + 8;
+        const effSz  = clamp(Math.floor(H * 0.024), 10, 17);
+        ctx.font         = `bold ${effSz}px Arial, sans-serif`;
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+
+        if (eff.type === 'magnet') {
+            ctx.fillStyle = '#00FFCC';
+            const secsLeft = Math.max(0, Math.ceil(eff.remainingMs / 1000));
+            ctx.fillText('MAGNET ' + secsLeft + 's', 12, effY);
+        } else {
+            // shield: no timer, show icon only
+            ctx.fillStyle = '#4499FF';
+            ctx.fillText('SHIELD', 12, effY);
+        }
+    }
+
+    ctx.restore();
+}
+
+// ── Start screen overlay ──────────────────────────────────────
+// Drawn on top of the static game world. Uses canvas fillText only —
+// never innerHTML — to prevent stored-XSS if served from a shared host.
+function drawStartOverlay(W, H) {
+    // Semi-transparent veil
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.68)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    // ── Game title ───────────────────────────────────────────
+    const titleSz = clamp(Math.floor(H * 0.10), 32, 80);
+    ctx.font = `bold ${titleSz}px 'Courier New', monospace`;
+
+    // Drop shadow
+    ctx.fillStyle = 'rgba(255, 80, 0, 0.55)';
+    ctx.fillText('DASHRUNNER', W * 0.5 + 4, H * 0.27 + 4);
+    // Foreground
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText('DASHRUNNER', W * 0.5, H * 0.27);
+
+    // ── Tagline ───────────────────────────────────────────────
+    const tagSz = clamp(Math.floor(H * 0.028), 13, 22);
+    ctx.font      = `${tagSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#99ccff';
+    ctx.fillText('Dodge obstacles · Collect coins · Survive as long as you can', W * 0.5, H * 0.38);
+
+    // ── Controls cheat-sheet ─────────────────────────────────
+    const ctrlSz = clamp(Math.floor(H * 0.026), 12, 20);
+    ctx.font = `${ctrlSz}px 'Courier New', monospace`;
+
+    const rows = [
+        ['← A / D →',       'Switch lanes'],
+        ['↑  W  Space',      'Jump'],
+        ['↓  S',             'Slide / Duck'],
+        ['Swipe left / right', 'Switch lanes (mobile)'],
+        ['Swipe up / down',   'Jump / Slide (mobile)'],
+    ];
+    const rowStep = ctrlSz * 2.4;
+    const blockTop = H * 0.48;
+
+    rows.forEach(([keys, action], i) => {
+        const y = blockTop + i * rowStep;
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#ffdd55';
+        ctx.fillText(keys, W * 0.5 - 14, y);
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#cccccc';
+        ctx.fillText(action, W * 0.5 + 14, y);
+    });
+
+    // ── M6: Stored high score from localStorage ───────────────
+    const hsSz = clamp(Math.floor(H * 0.024), 11, 18);
+    ctx.font      = `${hsSz}px Arial, sans-serif`;
+    ctx.fillStyle = highScore.bestDistance > 0 ? '#aaaaff' : '#777777';
+    ctx.textAlign = 'center';
+    // Safety: highScore values are numbers (validated in loadHighScore) —
+    // using fillText (never innerHTML) so XSS is not possible even on shared hosts.
+    const hsLabel = highScore.bestDistance > 0
+        ? `Best: ${highScore.bestDistance} m  ●  ${highScore.bestCoins} coins`
+        : 'Best: ---';
+    ctx.fillText(hsLabel, W * 0.5, blockTop + rows.length * rowStep + rowStep * 0.8);
+
+    // ── Blinking "press to start" prompt ─────────────────────
+    const blink = Math.floor(performance.now() / 600) % 2 === 0;
+    if (blink) {
+        const promptSz = clamp(Math.floor(H * 0.035), 14, 28);
+        ctx.font      = `bold ${promptSz}px Arial, sans-serif`;
+        ctx.fillStyle = '#00ff99';
+        ctx.fillText('Press any key or tap to start', W * 0.5, H * 0.88);
+    }
+
+    ctx.restore();
+}
+
+// ── Game-Over overlay ─────────────────────────────────────────
+// Shows final run stats, high score, optional "New Best!" badge,
+// a styled Restart button, and the cross-device disclaimer.
+// All text rendered via fillText — never innerHTML — to prevent stored-XSS.
+function drawGameOverOverlay(W, H) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    // ── Title ─────────────────────────────────────────────────
+    const titleSz = clamp(Math.floor(H * 0.09), 28, 72);
+    ctx.font = `bold ${titleSz}px Arial, sans-serif`;
+
+    // Drop shadow
+    ctx.fillStyle = 'rgba(180, 0, 0, 0.5)';
+    ctx.fillText('GAME OVER', W * 0.5 + 3, H * 0.22 + 3);
+    ctx.fillStyle = '#ff3333';
+    ctx.fillText('GAME OVER', W * 0.5, H * 0.22);
+
+    // ── Run stats ─────────────────────────────────────────────
+    const statSz = clamp(Math.floor(H * 0.038), 14, 30);
+    ctx.font      = `${statSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#ffffff';
+    // Safety: GameState values are numbers — fillText, not innerHTML.
+    ctx.fillText(`Distance:  ${Math.floor(GameState.distanceM)} m`, W * 0.5, H * 0.36);
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText(`Coins:  ${GameState.coins}`, W * 0.5, H * 0.43);
+
+    // ── M6: High score from localStorage ─────────────────────
+    const hsSz = clamp(Math.floor(H * 0.030), 12, 24);
+    ctx.font      = `bold ${hsSz}px Arial, sans-serif`;
+    const hsDistText  = highScore.bestDistance > 0
+        ? `${highScore.bestDistance} m`
+        : '---';
+    ctx.fillStyle = '#aaaaff';
+    ctx.fillText(`Best:  ${hsDistText}  ●  ${highScore.bestCoins} coins`, W * 0.5, H * 0.52);
+
+    // ── "New Best!" badge — shown when this run set a new record ──
+    if (newBestAchieved) {
+        const nbSz = clamp(Math.floor(H * 0.040), 15, 32);
+        ctx.font      = `bold ${nbSz}px Arial, sans-serif`;
+        ctx.fillStyle = '#ffdd00';
+        // Slight shadow for legibility
+        ctx.fillStyle = 'rgba(120, 80, 0, 0.6)';
+        ctx.fillText('★  New Best!  ★', W * 0.5 + 2, H * 0.60 + 2);
+        ctx.fillStyle = '#ffdd00';
+        ctx.fillText('★  New Best!  ★', W * 0.5, H * 0.60);
+    }
+
+    // ── Restart button (styled rectangle) ────────────────────
+    // Draw a filled pill-like rectangle so it reads as a tappable button
+    // on both desktop and mobile.
+    const rstSz = clamp(Math.floor(H * 0.038), 14, 28);
+    ctx.font = `bold ${rstSz}px Arial, sans-serif`;
+    const rstLabel   = 'RESTART';
+    const rstMetrics = ctx.measureText(rstLabel);
+    const rstBtnW    = rstMetrics.width + clamp(Math.floor(W * 0.08), 40, 80);
+    const rstBtnH    = rstSz + clamp(Math.floor(H * 0.03), 16, 28);
+    const rstBtnX    = W * 0.5 - rstBtnW * 0.5;
+    const rstBtnY    = H * 0.70 - rstBtnH * 0.5;
+
+    // Button fill
+    ctx.fillStyle = '#00cc77';
+    ctx.fillRect(rstBtnX, rstBtnY, rstBtnW, rstBtnH);
+    // Button border
+    ctx.strokeStyle = '#00ffaa';
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(rstBtnX, rstBtnY, rstBtnW, rstBtnH);
+    // Button label
+    ctx.fillStyle    = '#001a0f';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rstLabel, W * 0.5, H * 0.70);
+
+    // Small sub-label: keyboard shortcut hint
+    const hintSz = clamp(Math.floor(H * 0.020), 9, 14);
+    ctx.font      = `${hintSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#55aa88';
+    ctx.fillText('R  ·  Enter  ·  tap', W * 0.5, H * 0.70 + rstBtnH * 0.5 + hintSz);
+
+    // ── Cross-device note (technical design requirement) ──────
+    const noteSz = clamp(Math.floor(H * 0.022), 10, 16);
+    ctx.font      = `${noteSz}px Arial, sans-serif`;
+    ctx.fillStyle = '#555555';
+    ctx.fillText('Best score saved on this browser', W * 0.5, H * 0.92);
+
+    ctx.restore();
+}
+
+// ── Input handling ────────────────────────────────────────────
+// Only start/restart handled here for M1.
+// M2 adds in-game keyboard input; M5 adds full swipe recogniser.
+
+document.addEventListener('keydown', (e) => {
+    if (GameState.phase === 'start') {
+        startGame();
+        return;
+    }
+    if (GameState.phase === 'dead') {
+        if (e.key === 'r' || e.key === 'R' || e.key === 'Enter') {
+            restartGame();
+        }
+        return;
+    }
+
+    // ── In-game keyboard controls (M2) ───────────────────────
+    // All three keyboard schemes: arrow keys, WASD, Space
+    switch (e.key) {
+        case 'ArrowLeft':
+        case 'a':
+        case 'A':
+            handleInput('left');
+            break;
+
+        case 'ArrowRight':
+        case 'd':
+        case 'D':
+            handleInput('right');
+            break;
+
+        case 'ArrowUp':
+        case 'w':
+        case 'W':
+        case ' ':                   // Space
+            e.preventDefault();     // stop page-scroll on Space / ArrowUp
+            handleInput('jump');
+            break;
+
+        case 'ArrowDown':
+        case 's':
+        case 'S':
+            e.preventDefault();     // stop page-scroll on ArrowDown
+            handleInput('slideStart');
+            break;
+    }
+});
+
+// keyup: release slide when ArrowDown/S is lifted
+document.addEventListener('keyup', (e) => {
+    if (GameState.phase !== 'playing') return;
+    switch (e.key) {
+        case 'ArrowDown':
+        case 's':
+        case 'S':
+            handleInput('slideEnd');
+            break;
+    }
+});
+
+// Tap: start or restart — attached to canvas to limit scope
+canvas.addEventListener('click', () => {
+    if (GameState.phase === 'start')   startGame();
+    else if (GameState.phase === 'dead') restartGame();
+});
+
+// Touch: same, passive (no scroll prevention needed here)
+canvas.addEventListener('touchend', () => {
+    if (GameState.phase === 'start')   startGame();
+    else if (GameState.phase === 'dead') restartGame();
+}, { passive: true });
+
+// ── M5: SwipeRecognizer ───────────────────────────────────────
+// Handles all in-game swipe gestures. Wired to the same handleInput()
+// function as keyboard events — zero duplicate action logic.
+//
+// Design constraints (from technical spec):
+//   • touchmove listener MUST use { passive: false } on the canvas element
+//     (not window/document) to support calling preventDefault on iOS Safari 16+.
+//   • preventDefault is called ONLY while a gesture is in-flight AND movement
+//     exceeds SWIPE_PREVENT_PX — avoids breaking surrounding page scroll.
+//   • Minimum 30px delta + 250ms window prevents accidental trigger.
+//   • Direction: |dx| > |dy| → horizontal; |dy| > |dx| → vertical.
+//   • Slide swipe auto-releases after SLIDE_AUTO_RELEASE_MS (keyboard uses keyup;
+//     mobile swipe is instantaneous so we simulate the release via setTimeout).
+(function initSwipeRecognizer() {
+    let gestureActive = false;  // true while a single-finger gesture is in progress
+    let startX = 0, startY = 0, startT = 0;
+
+    // ── touchstart: record gesture origin ────────────────────
+    // passive:true — no need to preventDefault on gesture start.
+    // We capture the current GameState.phase at touchstart so that
+    // even if phase changes between touchstart and touchend (e.g. start/restart
+    // touchend fires first and calls startGame()), the SwipeRecognizer
+    // correctly ignores gestures that didn't begin during gameplay.
+    let gesturePhase = null;  // phase captured at touchstart; checked at touchend
+    canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) {
+            // Multi-touch cancels any pending single-finger gesture.
+            gestureActive = false;
+            gesturePhase  = null;
+            return;
+        }
+        const touch = e.touches[0];
+        startX        = touch.clientX;
+        startY        = touch.clientY;
+        startT        = performance.now();
+        gestureActive = true;
+        gesturePhase  = GameState.phase;  // snapshot; used in touchend
+    }, { passive: true });
+
+    // ── touchmove: prevent scroll conflict while swipe is live ─
+    // { passive: false } is REQUIRED here to call preventDefault on
+    // iOS Safari 16+. Listener is scoped to the canvas element only,
+    // so the surrounding page chrome scrolls normally when not touching
+    // the canvas.
+    canvas.addEventListener('touchmove', (e) => {
+        if (!gestureActive || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const dx    = touch.clientX - startX;
+        const dy    = touch.clientY - startY;
+        // Only block scroll after the gesture has clearly started moving.
+        if (Math.abs(dx) > SWIPE_PREVENT_PX || Math.abs(dy) > SWIPE_PREVENT_PX) {
+            e.preventDefault();
+        }
+    }, { passive: false });
+
+    // ── touchend: classify direction and fire action ──────────
+    canvas.addEventListener('touchend', (e) => {
+        if (!gestureActive) return;
+        gestureActive = false;
+
+        // Start/restart are handled by the separate touchend listener above.
+        // Swipe actions only apply to gestures that began during active gameplay.
+        // We check gesturePhase (captured at touchstart) rather than the current
+        // GameState.phase — this prevents a race where the start/restart touchend
+        // listener fires startGame() before this handler runs, making phase='playing'
+        // even though the gesture began on the start screen.
+        if (gesturePhase !== 'playing') return;
+
+        if (e.changedTouches.length === 0) return;
+        const touch = e.changedTouches[0];
+        const dx    = touch.clientX - startX;
+        const dy    = touch.clientY - startY;
+        const dtMs  = performance.now() - startT;
+
+        // Validate thresholds: ≥SWIPE_MIN_DELTA displacement, ≤SWIPE_MAX_MS duration.
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < SWIPE_MIN_DELTA || dtMs > SWIPE_MAX_MS) return;
+
+        // Classify: compare absolute deltas to determine dominant axis.
+        if (Math.abs(dx) > Math.abs(dy)) {
+            // Horizontal swipe → lane switch
+            handleInput(dx < 0 ? 'left' : 'right');
+        } else if (dy < 0) {
+            // Vertical swipe up → jump
+            handleInput('jump');
+        } else {
+            // Vertical swipe down → slide
+            // Keyboard uses keyup to release; for mobile we simulate the release
+            // after a fixed duration so the player doesn't get stuck sliding.
+            handleInput('slideStart');
+            setTimeout(() => handleInput('slideEnd'), SLIDE_AUTO_RELEASE_MS);
+        }
+    }, { passive: true });
+
+    // ── touchcancel: cancel gesture if interrupted ────────────
+    // (e.g. second finger touch, phone call notification, etc.)
+    canvas.addEventListener('touchcancel', () => {
+        gestureActive = false;
+    }, { passive: true });
+})();
+
+// ── Game-flow helpers ─────────────────────────────────────────
+function startGame() {
+    GameState.phase         = 'playing';
+    GameState.distanceM     = 0;
+    GameState.trackSpeed    = INITIAL_TRACK_SPEED;
+    GameState.score         = 0;
+    GameState.coins         = 0;
+    GameState.lives         = 3;
+    GameState.activeEffect  = null;
+    GameState.spawnCursor   = 0;
+    GameState.elapsedPlayMs = 0;
+
+    Player.lane            = 1;
+    Player.x               = getLaneCenterX(Player.lane);
+    Player.y               = groundY - Player.height;
+    Player.vy              = 0;
+    Player.state           = 'run';
+    Player.lives           = 3;
+    Player.invincible      = false;
+    Player.invincibleTimer = 0;
+    updatePlayerHitbox();
+
+    // M2: reset movement state
+    laneCooldown = 0;
+    slideHeld    = false;
+
+    // M3: reset obstacle state
+    obstacles           = [];
+    nextObstacleId      = 0;
+    patternIndex        = 0;
+    // First pattern spawns after INITIAL_SPAWN_GAP px of scroll.
+    // At 300px/s that's ~1s, then obstacle takes ~canvas.width/300 ≈ 2.7s to arrive.
+    GameState.spawnCursor = INITIAL_SPAWN_GAP;
+
+    trackScrollX = 0;
+
+    // M4: reset coin & power-up state
+    coins            = [];
+    powerUps         = [];
+    nextCoinId       = 0;
+    nextPowerUpId    = 0;
+    nextPowerUpDistM = POWERUP_SPAWN_DIST;
+}
+
+function restartGame() {
+    // M6: full game-loop flow — dead → start screen (not straight back to playing).
+    // Player sees the updated high score on the start screen before the next run.
+    // Reset all entity arrays and game state, then set phase='start'.
+    obstacles           = [];
+    coins               = [];
+    powerUps            = [];
+    nextObstacleId      = 0;
+    nextCoinId          = 0;
+    nextPowerUpId       = 0;
+    patternIndex        = 0;
+    trackScrollX        = 0;
+    laneCooldown        = 0;
+    slideHeld           = false;
+    nextPowerUpDistM    = POWERUP_SPAWN_DIST;
+
+    // Reset player position and state
+    Player.lane            = 1;
+    Player.x               = getLaneCenterX(Player.lane);
+    Player.y               = groundY - Player.height;
+    Player.vy              = 0;
+    Player.state           = 'run';
+    Player.lives           = 3;
+    Player.invincible      = false;
+    Player.invincibleTimer = 0;
+    updatePlayerHitbox();
+
+    // Reset GameState fields (phase → 'start' to complete the loop)
+    GameState.phase         = 'start';
+    GameState.distanceM     = 0;
+    GameState.trackSpeed    = INITIAL_TRACK_SPEED;
+    GameState.score         = 0;
+    GameState.coins         = 0;
+    GameState.lives         = 3;
+    GameState.activeEffect  = null;
+    GameState.spawnCursor   = INITIAL_SPAWN_GAP;
+    GameState.elapsedPlayMs = 0;
+
+    // newBestAchieved is intentionally left as-is here: it's already been
+    // displayed on the game-over screen and will be cleared on the next death.
+}
+
+// ── Game loop ─────────────────────────────────────────────────
+// requestAnimationFrame callback.
+// dt is clamped to MAX_DT (50ms) to prevent physics tunneling
+// when the user hides the tab and re-focuses it.
+let lastTimestamp = 0;
+
+function gameLoop(timestamp) {
+    const dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+    lastTimestamp = timestamp;
+
+    update(dt);
+    draw();
+
+    requestAnimationFrame(gameLoop);
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────
+window.addEventListener('resize', resize);
+
+// M6: load stored high score before first frame so the start screen
+// shows the correct value immediately.
+loadHighScore();
+
+resize();  // set initial pixel dimensions and draw first frame
+
+// Seed lastTimestamp then enter the loop so the first dt is ~0 rather than
+// the full time since page-load.
+requestAnimationFrame((ts) => {
+    lastTimestamp = ts;
+    requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
